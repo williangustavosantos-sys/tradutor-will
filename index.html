@@ -446,7 +446,7 @@ function useTranslator() {
       const ok = (v) => { if (!settled) { settled = true; clearTimeout(timeout); resolve(v); } };
       const fail = (e) => { if (!settled) { settled = true; clearTimeout(timeout); reject(e); } };
 
-      const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`;
+      const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`;
       const ws = new WebSocket(url);
       wsRef.current = ws;
       ws.onopen = () => sendSetup();
