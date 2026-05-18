@@ -19,5 +19,5 @@ window.TRADUTOR_CONFIG = {
   DEFAULT_API_KEY: 'AIzaSyDt28vDm1vO30JBniOAhwgKWFtsuArtxI0',
   DEFAULT_LANGUAGE_PAIR: 'pt-en',
   DEFAULT_ENGLISH_VARIANT: 'us',
-  GEMINI_MODEL: 'models/gemini-2.0-flash-exp',
+  GEMINI_MODEL: 'models/gemini-2.0-flash',
 };
