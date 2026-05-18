@@ -62,7 +62,7 @@
 // CONFIG (carregado de config.js)
 // ==========================================
 const APP_CONFIG = window.TRADUTOR_CONFIG || {};
-const GEMINI_MODEL = 'models/gemini-2.0-flash-exp';
+const GEMINI_MODEL = 'models/gemini-2.5-flash-preview-native-audio-dialog';
 const VOICE_NAME = 'Aoede';
 
 // ==========================================
@@ -325,7 +325,6 @@ function useTranslator() {
   const [micOn, setMicOn] = React.useState(true);
   const [elapsed, setElapsed] = React.useState(0);
   const [error, setError] = React.useState(null);
-  // Mensagens roteadas: A = no idioma de A | B = no idioma de B
   const [transA, setTransA] = React.useState([]);
   const [transB, setTransB] = React.useState([]);
 
@@ -343,10 +342,12 @@ function useTranslator() {
   const pausedRef = React.useRef(false);
   const audioOnRef = React.useRef(true);
   const micOnRef = React.useRef(true);
+  const statusRef = React.useRef('idle');
 
   React.useEffect(() => { pausedRef.current = paused; }, [paused]);
   React.useEffect(() => { audioOnRef.current = audioOn; }, [audioOn]);
   React.useEffect(() => { micOnRef.current = micOn; }, [micOn]);
+  React.useEffect(() => { statusRef.current = status; }, [status]);
 
   function appendTranslation(text) {
     if (!text || !text.trim()) return;
@@ -409,9 +410,14 @@ function useTranslator() {
     }));
   }
 
-  function handleServerMessage(text, resolveSetup) {
+  function handleServerMessage(text, resolveSetup, rejectSetup) {
     let msg;
     try { msg = JSON.parse(text); } catch (e) { return; }
+    if (msg.error) {
+      const errMsg = msg.error.message || 'Erro da API Gemini';
+      if (rejectSetup) rejectSetup(new Error(errMsg));
+      return;
+    }
     if (msg.setupComplete !== undefined) {
       if (resolveSetup) resolveSetup();
       return;
@@ -433,17 +439,28 @@ function useTranslator() {
 
   function connectWebSocket(apiKey) {
     return new Promise((resolve, reject) => {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (!settled) { settled = true; reject(new Error('Tempo esgotado ao conectar. Verifique sua API key e internet.')); }
+      }, 15000);
+      const ok = (v) => { if (!settled) { settled = true; clearTimeout(timeout); resolve(v); } };
+      const fail = (e) => { if (!settled) { settled = true; clearTimeout(timeout); reject(e); } };
+
       const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`;
       const ws = new WebSocket(url);
       wsRef.current = ws;
       ws.onopen = () => sendSetup();
       ws.onmessage = async (e) => {
         const t = e.data instanceof Blob ? await e.data.text() : e.data;
-        handleServerMessage(t, resolve);
+        handleServerMessage(t, ok, fail);
       };
-      ws.onerror = () => reject(new Error('Erro de conexão com a API'));
-      ws.onclose = () => {
-        if (status === 'active' || pausedRef.current) {
+      ws.onerror = () => fail(new Error('Erro de conexão com a API'));
+      ws.onclose = (ev) => {
+        if (!settled) {
+          fail(new Error(ev.reason || 'Conexão fechada antes de completar setup'));
+          return;
+        }
+        if (statusRef.current === 'active' || pausedRef.current) {
           scheduleReconnect();
         }
       };
@@ -1137,16 +1154,60 @@ function EndScreen({ elapsed, msgCount, onNew, theme }) {
 }
 
 // ==========================================
+// SPLASH SCREEN
+// ==========================================
+function SplashScreen({ onDone }) {
+  const videoRef = React.useRef(null);
+  const [fadeOut, setFadeOut] = React.useState(false);
+
+  React.useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    const onEnd = () => {
+      setFadeOut(true);
+      setTimeout(onDone, 500);
+    };
+    v.addEventListener('ended', onEnd);
+    v.play().catch(() => {
+      setTimeout(onDone, 800);
+    });
+    const fallback = setTimeout(onDone, 7000);
+    return () => { v.removeEventListener('ended', onEnd); clearTimeout(fallback); };
+  }, []);
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 9999,
+      background: '#FFFFFF',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      opacity: fadeOut ? 0 : 1,
+      transition: 'opacity 0.45s ease-out',
+    }}>
+      <video
+        ref={videoRef}
+        muted
+        playsInline
+        preload="auto"
+        style={{ width: '65vmin', height: '65vmin', objectFit: 'contain' }}
+      >
+        <source src="splash.webm" type="video/webm" />
+        <source src="splash.mp4" type="video/mp4" />
+      </video>
+    </div>
+  );
+}
+
+// ==========================================
 // MAIN APP
 // ==========================================
 function TradutorApp() {
+  const [splash, setSplash] = React.useState(true);
   const [screen, setScreen] = React.useState('setup');
   const [config, setConfig] = React.useState(null);
   const [endStats, setEndStats] = React.useState({ elapsed: 0, msgCount: 0 });
   const theme = getAppTheme('soft');
   const translator = useTranslator();
 
-  // Service worker
   React.useEffect(() => {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('sw.js').catch(() => {});
@@ -1173,13 +1234,14 @@ function TradutorApp() {
       height: '100%', display: 'flex', flexDirection: 'column',
       position: 'relative', overflow: 'hidden',
     }}>
-      {screen === 'setup' && (
+      {splash && <SplashScreen onDone={() => setSplash(false)} />}
+      {!splash && screen === 'setup' && (
         <SetupScreen onStart={handleStart} theme={theme} error={translator.error} />
       )}
-      {screen === 'active' && config && (
+      {!splash && screen === 'active' && config && (
         <ActiveScreen config={config} theme={theme} translator={translator} onEnd={handleEnd} />
       )}
-      {screen === 'end' && (
+      {!splash && screen === 'end' && (
         <EndScreen
           elapsed={endStats.elapsed}
           msgCount={endStats.msgCount}
