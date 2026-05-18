@@ -1,0 +1,1196 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#F2F2F7" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Tradutor Will" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="logo.png" />
+  <title>Tradutor Will</title>
+
+  <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+
+  <script src="config.js"></script>
+
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+      background: #F2F2F7;
+      font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+
+    #root { height: 100%; display: flex; flex-direction: column; }
+
+    button { font-family: inherit; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+// ==========================================
+// CONFIG (carregado de config.js)
+// ==========================================
+const APP_CONFIG = window.TRADUTOR_CONFIG || {};
+const GEMINI_MODEL = 'models/gemini-2.0-flash-exp';
+const VOICE_NAME = 'Aoede';
+
+// ==========================================
+// LANGUAGES
+// ==========================================
+const LANGUAGES = [
+  { id: 'pt-BR', label: 'Português',   short: 'PT', flag: '🇧🇷', color: '#2563EB', base: 'pt' },
+  { id: 'en-US', label: 'English (US)', short: 'EN', flag: '🇺🇸', color: '#DC2626', base: 'en' },
+  { id: 'en-GB', label: 'English (UK)', short: 'EN', flag: '🇬🇧', color: '#7C3AED', base: 'en' },
+  { id: 'it',    label: 'Italiano',     short: 'IT', flag: '🇮🇹', color: '#059669', base: 'it' },
+];
+
+const langById = (id) => LANGUAGES.find(l => l.id === id);
+
+// ==========================================
+// SYSTEM PROMPT BUILDER
+// ==========================================
+const PROMPT_PT_EN = `Você é um intérprete invisível em uma sessão de personal trainer entre dois falantes:
+- TREINADOR: fala português brasileiro (PT-BR)
+- ALUNO: fala inglês (EN)
+
+REGRAS ABSOLUTAS:
+1. Você NUNCA conversa. NUNCA responde como se a fala fosse dirigida a você.
+2. Sua ÚNICA função é traduzir o que cada um diz para o idioma do outro.
+3. Quando ouvir PORTUGUÊS → fale a tradução em INGLÊS natural.
+4. Quando ouvir INGLÊS → fale a tradução em PORTUGUÊS BRASILEIRO natural.
+5. Traduza pelo SENTIDO e CONTEXTO, nunca palavra por palavra.
+6. Mantenha consistência de terminologia ao longo de toda a sessão.
+7. NÃO traduza interjeições isoladas curtas ("uhum", "ok", "yeah", "hm"). Ignore-as.
+8. NÃO traduza ruídos, música, vozes distantes ou conversas que claramente não são entre os dois.
+9. Se a frase for longa, ESPERE a pausa natural antes de traduzir.
+10. Não explique, não comente, não pergunte. Apenas traduza.
+
+GLOSSÁRIO TÉCNICO — TREINAMENTO FUNCIONAL E BIOMECÂNICA:
+PT→EN:
+- "trava/ativa o core" → "brace your core"
+- "cadência" → "tempo" / "cadence"
+- "falha concêntrica" → "concentric failure"
+- "ponto morto" → "sticking point"
+- "amplitude" → "range of motion" (ROM)
+- "agachamento" → "squat"
+- "terra/levantamento terra" → "deadlift"
+- "supino" → "bench press"
+- "remada" → "row"
+- "desenvolvimento" → "overhead press"
+- "respira/expira na subida" → "breathe / exhale on the way up"
+- "contrai/aperta" → "squeeze"
+- "neutro/coluna neutra" → "neutral spine"
+- "ombros pra trás" → "shoulders back"
+- "abre o peito" → "open up your chest"
+- "joelho alinhado" → "knee tracking"
+- "quadril pra trás" → "push your hips back"
+- "explosivo/controlado" → "explosive / controlled"
+- "negativa/excêntrica/concêntrica" → "negative/eccentric/concentric"
+- "isso aí/isso mesmo" → "that's it / perfect"
+- "vamo lá/bora" → "let's go / come on"
+- "mais uma/última" → "one more / last one"
+- "aguenta/segura" → "hold it"
+- "carga/série/repetição/descanso" → "load / set / rep / rest"
+- "aquecimento/alongamento/mobilidade" → "warm-up / stretching / mobility"
+
+EN→PT:
+- "I'm tired" → "Estou cansado"
+- "it hurts/sharp pain/burning" → "está doendo / dor aguda / queimação"
+- "I can't" → "não consigo"
+- "let me rest" → "deixa eu descansar"
+
+Quando o falante usar gírias, adapte ao equivalente cultural — não traduza ao pé da letra.
+Em caso de dúvida, traduza pela intenção mais provável em contexto de treino físico.`;
+
+const PROMPT_PT_IT = `Você é um intérprete invisível entre dois falantes:
+- Falante A: português brasileiro (PT-BR)
+- Falante B: italiano (IT)
+
+REGRAS ABSOLUTAS:
+1. Você NUNCA conversa. NUNCA responde como se a fala fosse dirigida a você.
+2. Sua ÚNICA função é traduzir o que cada um diz para o idioma do outro.
+3. Quando ouvir PORTUGUÊS → fale a tradução em ITALIANO natural.
+4. Quando ouvir ITALIANO → fale a tradução em PORTUGUÊS BRASILEIRO natural.
+5. Traduza pelo SENTIDO e CONTEXTO, nunca palavra por palavra.
+6. NÃO traduza interjeições curtas ("uhum", "ok", "sì", "hm"). Ignore-as.
+7. Espere pausas naturais antes de traduzir frases longas.
+8. Não explique, não comente, não pergunte. Apenas traduza.
+
+GLOSSÁRIO TÉCNICO PT↔IT (quando aparecer):
+- "core" → "core" / "trava o core" → "stringi il core"
+- "agachamento" → "accosciata" / "squat"
+- "supino" → "panca piana"
+- "terra" → "stacco da terra"
+- "remada" → "rematore"
+- "respira / expira na subida" → "respira / espira mentre sali"
+- "contrai" → "stringi"
+- "neutro" → "schiena neutra"
+- "ombros pra trás" → "spalle indietro"
+- "joelho alinhado" → "ginocchio in linea"
+- "explosivo / controlado" → "esplosivo / controllato"
+- "isso / isso mesmo" → "così / esatto"
+- "vamo / bora" → "dai / andiamo"
+- "mais uma / última" → "ancora una / ultima"
+- "carga / série / repetição / descanso" → "carico / serie / ripetizione / riposo"
+- "aquecimento / alongamento" → "riscaldamento / stretching"
+
+EXPRESSÕES COMUNS:
+- "tudo bem?" → "tutto bene?"
+- "obrigado" → "grazie" / "por favor" → "per favore"
+- "estou cansado" → "sono stanco" / "está doendo" → "fa male"
+- "fala mais devagar" → "parla più lentamente"
+
+Em caso de dúvida, traduza pela intenção mais provável.`;
+
+const PROMPT_EN_IT = `You are an invisible interpreter between two speakers:
+- Speaker A: English (EN)
+- Speaker B: Italian (IT)
+
+ABSOLUTE RULES:
+1. You NEVER converse. You NEVER respond as if speech were addressed to you.
+2. Your ONLY function is to translate what each one says into the other's language.
+3. When you hear ENGLISH → speak the translation in natural ITALIAN.
+4. When you hear ITALIAN → speak the translation in natural ENGLISH.
+5. Translate by MEANING and CONTEXT, never word by word.
+6. Do not translate short isolated interjections ("uh-huh", "ok", "sì", "hm").
+7. Wait for natural pauses before translating long sentences.
+8. Do not explain, comment, or ask. Just translate.
+
+FITNESS / TRAINING TERMS:
+- "brace your core" → "stringi il core"
+- "squat" → "accosciata / squat"
+- "bench press" → "panca piana"
+- "deadlift" → "stacco da terra"
+- "breathe / exhale on the way up" → "respira / espira mentre sali"
+- "squeeze" → "stringi"
+- "shoulders back / open up your chest" → "spalle indietro / apri il petto"
+- "explosive / controlled" → "esplosivo / controllato"
+- "one more rep / last one" → "ancora una ripetizione / ultima"
+- "let's go / come on" → "dai / andiamo"
+- "set / rep / rest" → "serie / ripetizione / riposo"
+
+COMMON EXPRESSIONS:
+- "how are you?" → "come stai? / tutto bene?"
+- "thank you / please" → "grazie / per favore"
+- "I'm tired / it hurts" → "sono stanco / fa male"
+- "I don't understand / speak slower" → "non ho capito / parla più lentamente"
+
+Translate by the most likely intention in context.`;
+
+function variantSuffix(variant) {
+  return variant === 'uk'
+    ? `\n\n=== VARIANTE DE INGLÊS: BRITÂNICO (EN-GB) ===\n` +
+      `- Use SOTAQUE britânico (RP / Estuário, NÃO americano)\n` +
+      `- Vocabulário britânico: "trainers" (não "sneakers"), "lift" (não "elevator"), ` +
+      `"brilliant"/"lovely"/"cheers", "mate", "press-up", "well done"/"spot on"\n` +
+      `- Ortografia britânica: "colour", "centre", "realise", "favourite"`
+    : `\n\n=== VARIANTE DE INGLÊS: AMERICANO (EN-US) ===\n` +
+      `- Use SOTAQUE americano (General American)\n` +
+      `- Vocabulário americano: "sneakers", "elevator", "awesome"/"great", ` +
+      `"buddy"/"dude", "push-up", "you got it"\n` +
+      `- Ortografia americana: "color", "center", "realize", "favorite"`;
+}
+
+function buildSystemPrompt(langAId, langBId) {
+  const a = langById(langAId), b = langById(langBId);
+  if (!a || !b) return PROMPT_PT_EN;
+
+  const bases = new Set([a.base, b.base]);
+  let base;
+  if (bases.has('pt') && bases.has('en')) base = PROMPT_PT_EN;
+  else if (bases.has('pt') && bases.has('it')) base = PROMPT_PT_IT;
+  else if (bases.has('en') && bases.has('it')) base = PROMPT_EN_IT;
+  else base = PROMPT_PT_EN;
+
+  // Variante de inglês quando aplicável
+  const enLang = [a, b].find(l => l.base === 'en');
+  if (enLang) {
+    const variant = enLang.id === 'en-GB' ? 'uk' : 'us';
+    base = base + variantSuffix(variant);
+  }
+  return base;
+}
+
+// ==========================================
+// LANGUAGE DETECTION (pra rotear traduções pra metade certa)
+// ==========================================
+function detectBase(text) {
+  if (!text) return null;
+  const t = text.toLowerCase();
+  // Caracteres exclusivos
+  if (/[ãõçâ]/.test(t)) return 'pt';
+  if (/[ìòù]/.test(t) && !/[ãõ]/.test(t)) return 'it';
+  // Palavras-chave (ordem importa)
+  if (/\b(você|isso|estou|aqui|aí|treino|força|agachamento|série|carga|respira)\b/.test(t)) return 'pt';
+  if (/\b(non|molto|bene|grazie|ciao|allora|sono|sei|sì|adesso|forza)\b/.test(t)) return 'it';
+  if (/\b(the|you|your|good|okay|great|breathe|squeeze|let's|one|more|rep|set)\b/.test(t)) return 'en';
+  if (/\b(é|um|uma|esse|essa|este|esta|para|com|mas|mais|também)\b/.test(t)) return 'pt';
+  return null;
+}
+
+// ==========================================
+// THEMES
+// ==========================================
+function getAppTheme(style) {
+  const base = {
+    text: '#1C1C1E', textSec: '#8E8E93', textTer: '#AEAEB2',
+    divider: '#E5E5EA', primary: '#007AFF', danger: '#FF3B30',
+    success: '#34C759', radius: 14,
+    font: "-apple-system, 'SF Pro Text', system-ui, sans-serif",
+  };
+  if (style === 'minimal') return {
+    ...base, bg: '#FFFFFF', cardBg: '#FFFFFF',
+    cardBorder: '1px solid #E5E5EA', cardShadow: 'none',
+    halfBg: () => '#FFFFFF',
+    selBg: () => '#F2F2F7', selBorder: (c) => `2px solid ${c}`,
+    radius: 10,
+  };
+  if (style === 'vivid') return {
+    ...base, bg: '#FAFAFA', cardBg: '#FFFFFF',
+    cardBorder: 'none', cardShadow: '0 2px 8px rgba(0,0,0,0.06)',
+    halfBg: (c) => `${c}08`,
+    selBg: (c) => `${c}14`, selBorder: (c) => `2px solid ${c}`,
+    radius: 16,
+  };
+  return { // soft (default)
+    ...base, bg: '#F2F2F7', cardBg: '#FFFFFF',
+    cardBorder: 'none', cardShadow: '0 1px 3px rgba(0,0,0,0.05)',
+    halfBg: () => '#FFFFFF',
+    selBg: (c) => `${c}12`, selBorder: (c) => `2px solid ${c}`,
+    radius: 14,
+  };
+}
+
+// ==========================================
+// AUDIO UTILS
+// ==========================================
+function base64ToArrayBuffer(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let s = '', chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(s);
+}
+function int16ToFloat32(int16) {
+  const f = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) f[i] = int16[i] / 0x8000;
+  return f;
+}
+
+// ==========================================
+// HOOK: useTranslator
+// ==========================================
+function useTranslator() {
+  const [status, setStatus] = React.useState('idle'); // idle | connecting | active | reconnecting | error
+  const [paused, setPaused] = React.useState(false);
+  const [audioOn, setAudioOn] = React.useState(true);
+  const [micOn, setMicOn] = React.useState(true);
+  const [elapsed, setElapsed] = React.useState(0);
+  const [error, setError] = React.useState(null);
+  // Mensagens roteadas: A = no idioma de A | B = no idioma de B
+  const [transA, setTransA] = React.useState([]);
+  const [transB, setTransB] = React.useState([]);
+
+  const configRef = React.useRef(null);
+  const wsRef = React.useRef(null);
+  const inputCtxRef = React.useRef(null);
+  const outputCtxRef = React.useRef(null);
+  const micStreamRef = React.useRef(null);
+  const workletRef = React.useRef(null);
+  const wakeLockRef = React.useRef(null);
+  const nextPlayTimeRef = React.useRef(0);
+  const reconnectRef = React.useRef(0);
+  const timerRef = React.useRef(null);
+  const startTimeRef = React.useRef(null);
+  const pausedRef = React.useRef(false);
+  const audioOnRef = React.useRef(true);
+  const micOnRef = React.useRef(true);
+
+  React.useEffect(() => { pausedRef.current = paused; }, [paused]);
+  React.useEffect(() => { audioOnRef.current = audioOn; }, [audioOn]);
+  React.useEffect(() => { micOnRef.current = micOn; }, [micOn]);
+
+  function appendTranslation(text) {
+    if (!text || !text.trim()) return;
+    const cfg = configRef.current;
+    if (!cfg) return;
+    const a = langById(cfg.langA), b = langById(cfg.langB);
+    if (!a || !b) return;
+
+    const detected = detectBase(text);
+    let target;
+    if (detected === a.base && detected !== b.base) target = 'A';
+    else if (detected === b.base && detected !== a.base) target = 'B';
+    else {
+      // Fallback: alterna baseado em qual lado tem menos mensagens
+      target = transA.length <= transB.length ? 'A' : 'B';
+    }
+    if (target === 'A') setTransA(prev => [...prev, text]);
+    else setTransB(prev => [...prev, text]);
+  }
+
+  function playAudioChunk(b64) {
+    if (!audioOnRef.current) return;
+    if (!outputCtxRef.current) return;
+    const buf = base64ToArrayBuffer(b64);
+    const int16 = new Int16Array(buf);
+    const f32 = int16ToFloat32(int16);
+    if (f32.length === 0) return;
+    const ctx = outputCtxRef.current;
+    const ab = ctx.createBuffer(1, f32.length, 24000);
+    ab.copyToChannel(f32, 0);
+    const src = ctx.createBufferSource();
+    src.buffer = ab;
+    src.connect(ctx.destination);
+    const now = ctx.currentTime;
+    const at = Math.max(nextPlayTimeRef.current, now);
+    src.start(at);
+    nextPlayTimeRef.current = at + ab.duration;
+  }
+
+  function interruptPlayback() {
+    if (outputCtxRef.current) {
+      nextPlayTimeRef.current = outputCtxRef.current.currentTime;
+    }
+  }
+
+  function sendSetup() {
+    const cfg = configRef.current;
+    wsRef.current.send(JSON.stringify({
+      setup: {
+        model: GEMINI_MODEL,
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: VOICE_NAME } } },
+          temperature: 0.3,
+        },
+        systemInstruction: { parts: [{ text: buildSystemPrompt(cfg.langA, cfg.langB) }] },
+        outputAudioTranscription: {},
+        inputAudioTranscription: {},
+      }
+    }));
+  }
+
+  function handleServerMessage(text, resolveSetup) {
+    let msg;
+    try { msg = JSON.parse(text); } catch (e) { return; }
+    if (msg.setupComplete !== undefined) {
+      if (resolveSetup) resolveSetup();
+      return;
+    }
+    const sc = msg.serverContent;
+    if (!sc) return;
+    if (sc.modelTurn?.parts) {
+      for (const part of sc.modelTurn.parts) {
+        if (part.inlineData?.mimeType?.startsWith('audio/pcm') && part.inlineData.data) {
+          playAudioChunk(part.inlineData.data);
+        }
+      }
+    }
+    if (sc.outputTranscription?.text) {
+      appendTranslation(sc.outputTranscription.text);
+    }
+    if (sc.interrupted) interruptPlayback();
+  }
+
+  function connectWebSocket(apiKey) {
+    return new Promise((resolve, reject) => {
+      const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`;
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
+      ws.onopen = () => sendSetup();
+      ws.onmessage = async (e) => {
+        const t = e.data instanceof Blob ? await e.data.text() : e.data;
+        handleServerMessage(t, resolve);
+      };
+      ws.onerror = () => reject(new Error('Erro de conexão com a API'));
+      ws.onclose = () => {
+        if (status === 'active' || pausedRef.current) {
+          scheduleReconnect();
+        }
+      };
+    });
+  }
+
+  function scheduleReconnect() {
+    reconnectRef.current++;
+    if (reconnectRef.current > 5) {
+      setError('Não foi possível reconectar. Verifique a internet.');
+      stop();
+      return;
+    }
+    setStatus('reconnecting');
+    const delay = Math.min(1000 * reconnectRef.current, 5000);
+    setTimeout(async () => {
+      try {
+        const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
+        await connectWebSocket(apiKey);
+        setStatus('active');
+        reconnectRef.current = 0;
+      } catch (e) { scheduleReconnect(); }
+    }, delay);
+  }
+
+  async function initAudio() {
+    inputCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    outputCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+    nextPlayTimeRef.current = outputCtxRef.current.currentTime;
+
+    await inputCtxRef.current.audioWorklet.addModule('mic-worklet.js');
+    micStreamRef.current = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+      }
+    });
+
+    const source = inputCtxRef.current.createMediaStreamSource(micStreamRef.current);
+    workletRef.current = new AudioWorkletNode(inputCtxRef.current, 'mic-processor');
+    workletRef.current.port.onmessage = (e) => {
+      if (pausedRef.current || !micOnRef.current) return;
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+      const b64 = arrayBufferToBase64(e.data);
+      wsRef.current.send(JSON.stringify({
+        realtimeInput: {
+          mediaChunks: [{ mimeType: 'audio/pcm;rate=16000', data: b64 }]
+        }
+      }));
+    };
+    source.connect(workletRef.current);
+  }
+
+  async function requestWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try { wakeLockRef.current = await navigator.wakeLock.request('screen'); }
+    catch (e) {}
+  }
+
+  function startTimer() {
+    startTimeRef.current = Date.now();
+    setElapsed(0);
+    timerRef.current = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000));
+    }, 1000);
+  }
+  function stopTimer() {
+    clearInterval(timerRef.current);
+    timerRef.current = null;
+  }
+
+  async function start(config) {
+    configRef.current = config;
+    const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
+    if (!apiKey) {
+      setError('Falta a API key (config.js).');
+      return false;
+    }
+    setError(null);
+    setTransA([]); setTransB([]);
+    setAudioOn(config.audio !== false);
+    setMicOn(true);
+    setPaused(false);
+    setStatus('connecting');
+    try {
+      await initAudio();
+      await connectWebSocket(apiKey);
+      setStatus('active');
+      startTimer();
+      await requestWakeLock();
+      return true;
+    } catch (e) {
+      setError('Erro ao iniciar: ' + e.message);
+      setStatus('error');
+      stop();
+      return false;
+    }
+  }
+
+  function stop() {
+    setStatus('idle');
+    setPaused(false);
+    if (wsRef.current) { try { wsRef.current.close(); } catch(e){} wsRef.current = null; }
+    if (workletRef.current) { workletRef.current.disconnect(); workletRef.current = null; }
+    if (micStreamRef.current) { micStreamRef.current.getTracks().forEach(t => t.stop()); micStreamRef.current = null; }
+    if (inputCtxRef.current) { inputCtxRef.current.close(); inputCtxRef.current = null; }
+    if (outputCtxRef.current) { outputCtxRef.current.close(); outputCtxRef.current = null; }
+    if (wakeLockRef.current) { wakeLockRef.current.release(); wakeLockRef.current = null; }
+    stopTimer();
+    reconnectRef.current = 0;
+  }
+
+  function pause() { setPaused(true); }
+  function resume() { setPaused(false); }
+  function toggleAudio() { setAudioOn(v => !v); }
+  function toggleMic() { setMicOn(v => !v); }
+
+  function sendText(text) {
+    if (!text || !text.trim()) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({
+      clientContent: {
+        turns: [{ role: 'user', parts: [{ text: text.trim() }] }],
+        turnComplete: true,
+      }
+    }));
+  }
+
+  return {
+    status, paused, audioOn, micOn, elapsed, error,
+    transA, transB,
+    start, stop, pause, resume, toggleAudio, toggleMic, sendText,
+  };
+}
+
+// ==========================================
+// SMALL COMPONENTS
+// ==========================================
+function LangCard({ lang, selected, onSelect, theme }) {
+  return (
+    <button onClick={onSelect} style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '11px 10px', width: '100%',
+      background: selected ? theme.selBg(lang.color) : theme.cardBg,
+      border: selected ? theme.selBorder(lang.color) : (theme.cardBorder || `1px solid ${theme.divider}`),
+      borderRadius: theme.radius, cursor: 'pointer',
+      boxShadow: selected ? 'none' : theme.cardShadow,
+      transition: 'all 0.15s ease', fontFamily: theme.font, outline: 'none',
+    }}>
+      <span style={{ fontSize: 22, lineHeight: 1 }}>{lang.flag}</span>
+      <span style={{
+        fontSize: 13, fontWeight: selected ? 600 : 400,
+        color: selected ? lang.color : theme.text, whiteSpace: 'nowrap',
+      }}>{lang.label}</span>
+      {selected && (
+        <svg width="15" height="15" viewBox="0 0 16 16" style={{ marginLeft: 'auto', flexShrink: 0 }}>
+          <circle cx="8" cy="8" r="8" fill={lang.color} />
+          <path d="M5 8l2 2 4-4" stroke="#fff" strokeWidth="1.5" fill="none"
+                strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+function IOSToggle({ value, onChange, theme }) {
+  return (
+    <button onClick={() => onChange(!value)} style={{
+      width: 51, height: 31, borderRadius: 16, border: 'none', cursor: 'pointer',
+      background: value ? theme.success : '#E5E5EA', position: 'relative',
+      transition: 'background 0.2s ease', padding: 0, flexShrink: 0,
+    }}>
+      <div style={{
+        width: 27, height: 27, borderRadius: '50%', background: '#FFF',
+        position: 'absolute', top: 2, left: value ? 22 : 2,
+        transition: 'left 0.2s ease',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.15)',
+      }} />
+    </button>
+  );
+}
+
+function OptionRow({ label, children, theme }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      padding: '13px 16px', background: theme.cardBg, borderRadius: theme.radius,
+      boxShadow: theme.cardShadow, border: theme.cardBorder || 'none',
+    }}>
+      <span style={{ fontSize: 15, color: theme.text, fontFamily: theme.font }}>{label}</span>
+      {children}
+    </div>
+  );
+}
+
+function MicIcon({ size = 16, color = 'currentColor' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 20" fill="none">
+      <rect x="5" y="1" width="6" height="11" rx="3" fill={color} />
+      <path d="M1 9a7 7 0 0014 0" stroke={color} strokeWidth="1.5" fill="none" strokeLinecap="round" />
+      <line x1="8" y1="16" x2="8" y2="19" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function MicMutedIcon({ size = 16, color = 'currentColor' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 20" fill="none">
+      <rect x="5" y="1" width="6" height="11" rx="3" fill={color} />
+      <path d="M1 9a7 7 0 0014 0" stroke={color} strokeWidth="1.5" fill="none" strokeLinecap="round" />
+      <line x1="8" y1="16" x2="8" y2="19" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
+      <line x1="2" y1="2" x2="14" y2="18" stroke={color} strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// ==========================================
+// TRANSLATION VIEW (legenda grande estilo)
+// ==========================================
+function TranslationView({ lang, translations, theme, padTop, padBot, listening }) {
+  const latest = translations.length > 0 ? translations[translations.length - 1] : null;
+  const history = translations.slice(0, -1);
+
+  return (
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column',
+      padding: `${padTop || 12}px 18px ${padBot || 12}px`,
+      background: theme.halfBg(lang.color),
+      overflow: 'hidden', fontFamily: theme.font,
+      minHeight: 0,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        <span style={{ fontSize: 18, lineHeight: 1 }}>{lang.flag}</span>
+        <span style={{
+          fontSize: 11, fontWeight: 700, color: lang.color,
+          textTransform: 'uppercase', letterSpacing: 0.8,
+        }}>{lang.label}</span>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5 }}>
+          <div style={{
+            width: 6, height: 6, borderRadius: '50%',
+            background: listening ? theme.success : '#C0C0C0',
+            boxShadow: listening ? `0 0 6px ${theme.success}80` : 'none',
+            animation: listening ? 'pulse 2s infinite' : 'none',
+          }} />
+          <span style={{ fontSize: 10, color: theme.textSec }}>
+            {listening ? 'Ouvindo' : 'Pausado'}
+          </span>
+        </div>
+      </div>
+
+      <div style={{
+        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        minHeight: 0, padding: '8px 0',
+      }}>
+        {latest ? (
+          <p key={translations.length} style={{
+            fontSize: 28, fontWeight: 600, color: theme.text,
+            lineHeight: 1.22, margin: 0,
+            textAlign: 'center', textWrap: 'balance',
+            letterSpacing: -0.3,
+            animation: 'slideUp 0.3s ease',
+          }}>{latest}</p>
+        ) : (
+          <p style={{
+            fontSize: 14, color: theme.textTer, margin: 0, textAlign: 'center',
+          }}>Aguardando tradução…</p>
+        )}
+      </div>
+
+      {history.length > 0 && (
+        <div style={{
+          flexShrink: 0, display: 'flex', flexDirection: 'column',
+          borderTop: `1px solid ${theme.divider}`,
+          paddingTop: 6,
+        }}>
+          {history.slice(-3).map((t, i, arr) => {
+            const opacity = 0.18 + (i / Math.max(arr.length - 1, 1)) * 0.25;
+            return (
+              <p key={i + '-' + t.slice(0, 8)} style={{
+                fontSize: 12, color: theme.text, opacity,
+                margin: '1px 0', lineHeight: 1.3, textAlign: 'center',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }}>{t}</p>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ==========================================
+// SETUP SCREEN
+// ==========================================
+function SetupScreen({ onStart, theme, error }) {
+  const [langA, setLangA] = React.useState(() => localStorage.getItem('lang_a') || 'pt-BR');
+  const [langB, setLangB] = React.useState(() => localStorage.getItem('lang_b') || 'en-US');
+  const [audio, setAudio] = React.useState(true);
+
+  React.useEffect(() => { localStorage.setItem('lang_a', langA); }, [langA]);
+  React.useEffect(() => { localStorage.setItem('lang_b', langB); }, [langB]);
+
+  const swap = () => { const t = langA; setLangA(langB); setLangB(t); };
+
+  const sameLang = langA === langB;
+
+  return (
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column',
+      padding: '24px 20px 24px', background: theme.bg,
+      fontFamily: theme.font, overflow: 'auto',
+    }}>
+      <div style={{ textAlign: 'center', marginBottom: 16, paddingTop: 8 }}>
+        <img src="logo.png" alt="Will Translator" style={{
+          width: 150, height: 'auto', borderRadius: 8,
+        }} />
+      </div>
+
+      <label style={{
+        fontSize: 12, fontWeight: 700, color: theme.textSec,
+        textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8,
+        display: 'block',
+      }}>Eu falo</label>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
+        {LANGUAGES.map(l => (
+          <LangCard key={l.id} lang={l} selected={langA === l.id}
+                    onSelect={() => setLangA(l.id)} theme={theme} />
+        ))}
+      </div>
+
+      <div style={{ display: 'flex', justifyContent: 'center', margin: '2px 0 6px' }}>
+        <button onClick={swap} style={{
+          width: 40, height: 40, borderRadius: '50%',
+          border: `1px solid ${theme.divider}`, background: theme.cardBg,
+          cursor: 'pointer', display: 'flex', alignItems: 'center',
+          justifyContent: 'center', color: theme.primary,
+          boxShadow: theme.cardShadow, outline: 'none',
+        }}>
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+            <path d="M9 2v14M9 2l-3 3M9 2l3 3M9 16l-3-3M9 16l3-3"
+                  stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </button>
+      </div>
+
+      <label style={{
+        fontSize: 12, fontWeight: 700, color: theme.textSec,
+        textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8,
+        display: 'block',
+      }}>Outra pessoa fala</label>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 20 }}>
+        {LANGUAGES.map(l => (
+          <LangCard key={l.id} lang={l} selected={langB === l.id}
+                    onSelect={() => setLangB(l.id)} theme={theme} />
+        ))}
+      </div>
+
+      <OptionRow label="Traduzir em áudio" theme={theme}>
+        <IOSToggle value={audio} onChange={setAudio} theme={theme} />
+      </OptionRow>
+
+      {sameLang && (
+        <div style={{
+          marginTop: 14, padding: '10px 14px',
+          background: '#FFF3CD', color: '#856404',
+          borderRadius: theme.radius, fontSize: 13,
+        }}>Os dois idiomas precisam ser diferentes pra traduzir.</div>
+      )}
+
+      {error && (
+        <div style={{
+          marginTop: 14, padding: '10px 14px',
+          background: '#FFE0E0', color: theme.danger,
+          borderRadius: theme.radius, fontSize: 13,
+        }}>{error}</div>
+      )}
+
+      <div style={{ flex: 1, minHeight: 16 }} />
+
+      <button
+        onClick={() => !sameLang && onStart({ langA, langB, audio })}
+        disabled={sameLang}
+        style={{
+          width: '100%', padding: '17px', borderRadius: theme.radius,
+          background: sameLang ? theme.textTer : theme.primary,
+          color: '#FFF', border: 'none',
+          fontSize: 17, fontWeight: 600,
+          cursor: sameLang ? 'not-allowed' : 'pointer',
+          fontFamily: theme.font,
+          boxShadow: sameLang ? 'none' : `0 4px 14px ${theme.primary}40`,
+        }}>Iniciar Sessão</button>
+    </div>
+  );
+}
+
+// ==========================================
+// ACTIVE SCREEN
+// ==========================================
+function fmtTime(secs) {
+  const m = String(Math.floor(secs / 60)).padStart(2, '0');
+  const s = String(secs % 60).padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+function ActiveScreen({ config, theme, translator, onEnd }) {
+  const [layout, setLayout] = React.useState(() => localStorage.getItem('layout') || 'vertical');
+  const [showLayoutMenu, setShowLayoutMenu] = React.useState(false);
+  const [showKb, setShowKb] = React.useState(false);
+  const [typing, setTyping] = React.useState('');
+
+  React.useEffect(() => { localStorage.setItem('layout', layout); }, [layout]);
+
+  const langA = langById(config.langA);
+  const langB = langById(config.langB);
+  const isVert = layout !== 'horizontal';
+  const isRotated = layout === 'vertical';
+
+  const listening = translator.status === 'active' && !translator.paused && translator.micOn;
+
+  const ctrlBtn = (child, opts = {}) => (
+    <button onClick={opts.onClick} title={opts.title} style={{
+      width: 38, height: 38, borderRadius: '50%',
+      border: `1px solid ${opts.danger ? theme.danger + '30' : opts.active ? theme.primary + '40' : theme.divider}`,
+      background: opts.danger ? theme.danger + '10' : opts.active ? theme.primary + '12' : theme.cardBg,
+      cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+      color: opts.danger ? theme.danger : opts.active ? theme.primary : theme.textSec,
+      outline: 'none', fontSize: 15, flexShrink: 0,
+    }}>{child}</button>
+  );
+
+  const sendKb = () => {
+    if (typing.trim()) {
+      translator.sendText(typing.trim());
+      setTyping('');
+    }
+  };
+
+  return (
+    <div style={{
+      height: '100%', display: 'flex', flexDirection: 'column',
+      position: 'relative', fontFamily: theme.font, background: theme.bg,
+    }}>
+      {translator.paused && (
+        <PausedOverlay
+          elapsed={translator.elapsed}
+          msgCount={translator.transA.length + translator.transB.length}
+          onResume={translator.resume}
+          onEnd={onEnd}
+          theme={theme} />
+      )}
+
+      <div style={{
+        flex: '1 1 0%', display: 'flex',
+        flexDirection: isVert ? 'column' : 'row',
+        overflow: 'hidden', minHeight: 0,
+      }}>
+        <div style={{
+          flex: 1, display: 'flex', flexDirection: 'column',
+          transform: isRotated ? 'rotate(180deg)' : 'none',
+          overflow: 'hidden', minHeight: 0, minWidth: 0,
+          borderBottom: isVert ? `1px solid ${theme.divider}` : 'none',
+          borderRight: !isVert ? `1px solid ${theme.divider}` : 'none',
+        }}>
+          <TranslationView lang={langB} translations={translator.transB} theme={theme}
+            padTop={isRotated ? 8 : 22} padBot={isRotated ? 22 : 8} listening={listening} />
+        </div>
+
+        <div style={{
+          flex: 1, display: 'flex', flexDirection: 'column',
+          overflow: 'hidden', minHeight: 0, minWidth: 0,
+        }}>
+          <TranslationView lang={langA} translations={translator.transA} theme={theme}
+            padTop={isVert ? 8 : 22} listening={listening} />
+        </div>
+      </div>
+
+      {showLayoutMenu && (
+        <div style={{
+          position: 'absolute', bottom: 62, left: '50%',
+          transform: 'translateX(-50%)',
+          background: theme.cardBg, borderRadius: theme.radius,
+          boxShadow: '0 6px 24px rgba(0,0,0,0.18)',
+          border: theme.cardBorder || `1px solid ${theme.divider}`,
+          padding: 6, zIndex: 50, width: 200,
+          display: 'flex', flexDirection: 'column', gap: 2,
+        }}>
+          <div style={{
+            fontSize: 10, fontWeight: 700, color: theme.textSec,
+            padding: '6px 10px 4px', letterSpacing: 0.6, textTransform: 'uppercase',
+          }}>Layout</div>
+          {[
+            { v: 'vertical', l: 'Frente a frente' },
+            { v: 'same', l: 'Mesmo lado' },
+            { v: 'horizontal', l: 'Lado a lado' },
+          ].map(opt => (
+            <button key={opt.v}
+              onClick={() => { setLayout(opt.v); setShowLayoutMenu(false); }}
+              style={{
+                padding: '10px 12px', textAlign: 'left',
+                background: layout === opt.v ? theme.primary + '12' : 'transparent',
+                color: layout === opt.v ? theme.primary : theme.text,
+                border: 'none', borderRadius: 8, cursor: 'pointer',
+                fontSize: 14, fontFamily: theme.font,
+                fontWeight: layout === opt.v ? 600 : 400,
+                outline: 'none',
+              }}>{opt.l}</button>
+          ))}
+        </div>
+      )}
+
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        gap: 8, padding: '8px 16px 4px',
+        background: theme.bg, borderTop: `1px solid ${theme.divider}`,
+        flexShrink: 0,
+      }}>
+        <span style={{
+          fontSize: 13, fontWeight: 600, color: theme.textSec,
+          fontVariantNumeric: 'tabular-nums', marginRight: 2, minWidth: 38,
+        }}>{fmtTime(translator.elapsed)}</span>
+
+        {ctrlBtn(
+          translator.micOn ? <MicIcon size={14} /> : <MicMutedIcon size={14} />,
+          { onClick: translator.toggleMic, active: translator.micOn, title: translator.micOn ? 'Microfone ligado' : 'Microfone mudo' }
+        )}
+        {ctrlBtn(
+          <svg width="15" height="12" viewBox="0 0 15 12" fill="none">
+            <rect x="0.5" y="0.5" width="14" height="11" rx="2" stroke="currentColor" strokeWidth="1"/>
+            <line x1="3" y1="4" x2="12" y2="4" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
+            <line x1="3" y1="7" x2="9" y2="7" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
+          </svg>,
+          { onClick: () => setShowKb(!showKb), active: showKb, title: 'Teclado' }
+        )}
+        {ctrlBtn(
+          <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
+            <path d="M1 3.5V2a1 1 0 011-1h3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+            <path d="M1 10.5V12a1 1 0 001 1h3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+            <path d="M15 3.5V2a1 1 0 00-1-1h-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+            <path d="M15 10.5V12a1 1 0 01-1 1h-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+            {translator.audioOn ? (
+              <>
+                <path d="M5 5.5L7.5 4v6L5 8.5H3.5v-3H5z" fill="currentColor"/>
+                <path d="M9.5 5a2.5 2.5 0 010 4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" fill="none"/>
+                <path d="M11 3.5a4.5 4.5 0 010 7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" fill="none"/>
+              </>
+            ) : (
+              <>
+                <path d="M5 5.5L7.5 4v6L5 8.5H3.5v-3H5z" fill="currentColor"/>
+                <line x1="10" y1="5" x2="13" y2="9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                <line x1="13" y1="5" x2="10" y2="9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+              </>
+            )}
+          </svg>,
+          { onClick: translator.toggleAudio, active: translator.audioOn, title: translator.audioOn ? 'Áudio ligado' : 'Áudio mudo' }
+        )}
+        {ctrlBtn(
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <rect x="1" y="1" width="12" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
+            <rect x="1" y="8" width="12" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
+          </svg>,
+          { onClick: () => setShowLayoutMenu(!showLayoutMenu), active: showLayoutMenu, title: 'Layout' }
+        )}
+        {ctrlBtn(
+          <svg width="12" height="14" viewBox="0 0 12 14" fill="none">
+            <rect x="1" y="1" width="4" height="12" rx="1" fill="currentColor"/>
+            <rect x="7" y="1" width="4" height="12" rx="1" fill="currentColor"/>
+          </svg>,
+          { onClick: translator.pause, title: 'Pausar' }
+        )}
+        {ctrlBtn(
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <rect width="12" height="12" rx="2" fill="currentColor"/>
+          </svg>,
+          { onClick: onEnd, danger: true, title: 'Encerrar' }
+        )}
+      </div>
+
+      {showKb && (
+        <div style={{
+          padding: '8px 16px 6px', borderTop: `1px solid ${theme.divider}`,
+          background: theme.bg, flexShrink: 0,
+        }}>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input type="text" value={typing} onChange={e => setTyping(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') sendKb(); }}
+              placeholder="Digite para traduzir..."
+              style={{
+                flex: 1, padding: '11px 14px', borderRadius: theme.radius,
+                border: `1px solid ${theme.divider}`, background: theme.cardBg,
+                color: theme.text, fontSize: 15, outline: 'none', fontFamily: theme.font,
+              }} />
+            <button onClick={sendKb} style={{
+              padding: '11px 14px', borderRadius: theme.radius,
+              background: theme.primary, color: '#FFF', border: 'none',
+              fontSize: 14, fontWeight: 600, cursor: 'pointer', fontFamily: theme.font,
+            }}>Enviar</button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ height: 8, flexShrink: 0 }} />
+    </div>
+  );
+}
+
+// ==========================================
+// PAUSED OVERLAY
+// ==========================================
+function PausedOverlay({ elapsed, msgCount, onResume, onEnd, theme }) {
+  return (
+    <div style={{
+      position: 'absolute', inset: 0, zIndex: 100,
+      background: 'rgba(0,0,0,0.55)',
+      backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)',
+      display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center', gap: 12,
+      fontFamily: theme.font, animation: 'fadeIn 0.2s ease',
+    }}>
+      <div style={{
+        width: 56, height: 56, borderRadius: '50%',
+        background: 'rgba(255,255,255,0.12)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        marginBottom: 4,
+      }}>
+        <svg width="22" height="26" viewBox="0 0 12 14" fill="none">
+          <rect x="1" y="1" width="4" height="12" rx="1" fill="#FFF"/>
+          <rect x="7" y="1" width="4" height="12" rx="1" fill="#FFF"/>
+        </svg>
+      </div>
+      <span style={{ fontSize: 20, fontWeight: 600, color: '#FFF' }}>Sessão Pausada</span>
+      <span style={{ fontSize: 14, color: 'rgba(255,255,255,0.55)' }}>
+        {fmtTime(elapsed)} · {msgCount} {msgCount === 1 ? 'mensagem' : 'mensagens'}
+      </span>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, width: 200, marginTop: 8 }}>
+        <button onClick={onResume} style={{
+          padding: '15px', borderRadius: theme.radius, width: '100%',
+          background: theme.primary, color: '#FFF', border: 'none',
+          fontSize: 16, fontWeight: 600, cursor: 'pointer', fontFamily: theme.font,
+        }}>Retomar</button>
+        <button onClick={onEnd} style={{
+          padding: '15px', borderRadius: theme.radius, width: '100%',
+          background: 'rgba(255,255,255,0.1)', color: '#FFF',
+          border: '1px solid rgba(255,255,255,0.2)',
+          fontSize: 16, fontWeight: 600, cursor: 'pointer', fontFamily: theme.font,
+        }}>Encerrar</button>
+      </div>
+    </div>
+  );
+}
+
+// ==========================================
+// END SCREEN
+// ==========================================
+function EndScreen({ elapsed, msgCount, onNew, theme }) {
+  return (
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center',
+      padding: '40px 32px', background: theme.bg,
+      fontFamily: theme.font, gap: 4, minHeight: '100%',
+    }}>
+      <div style={{
+        width: 60, height: 60, borderRadius: '50%',
+        background: theme.success + '15',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        marginBottom: 8,
+      }}>
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+          <path d="M6 14l6 6 10-10" stroke={theme.success} strokeWidth="2.5"
+                strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </div>
+      <h2 style={{ fontSize: 22, fontWeight: 700, color: theme.text, margin: 0 }}>
+        Sessão Encerrada
+      </h2>
+      <p style={{ fontSize: 15, color: theme.textSec, margin: '2px 0 0' }}>
+        Duração: {fmtTime(elapsed)}
+      </p>
+      <p style={{ fontSize: 15, color: theme.textSec, margin: '2px 0 24px' }}>
+        {msgCount} {msgCount === 1 ? 'mensagem traduzida' : 'mensagens traduzidas'}
+      </p>
+      <button onClick={onNew} style={{
+        padding: '16px 48px', borderRadius: theme.radius,
+        background: theme.primary, color: '#FFF', border: 'none',
+        fontSize: 17, fontWeight: 600, cursor: 'pointer', fontFamily: theme.font,
+      }}>Nova Sessão</button>
+    </div>
+  );
+}
+
+// ==========================================
+// MAIN APP
+// ==========================================
+function TradutorApp() {
+  const [screen, setScreen] = React.useState('setup');
+  const [config, setConfig] = React.useState(null);
+  const [endStats, setEndStats] = React.useState({ elapsed: 0, msgCount: 0 });
+  const theme = getAppTheme('soft');
+  const translator = useTranslator();
+
+  // Service worker
+  React.useEffect(() => {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    }
+  }, []);
+
+  const handleStart = async (cfg) => {
+    setConfig(cfg);
+    const ok = await translator.start(cfg);
+    if (ok) setScreen('active');
+  };
+
+  const handleEnd = () => {
+    setEndStats({
+      elapsed: translator.elapsed,
+      msgCount: translator.transA.length + translator.transB.length,
+    });
+    translator.stop();
+    setScreen('end');
+  };
+
+  return (
+    <div style={{
+      height: '100%', display: 'flex', flexDirection: 'column',
+      position: 'relative', overflow: 'hidden',
+    }}>
+      {screen === 'setup' && (
+        <SetupScreen onStart={handleStart} theme={theme} error={translator.error} />
+      )}
+      {screen === 'active' && config && (
+        <ActiveScreen config={config} theme={theme} translator={translator} onEnd={handleEnd} />
+      )}
+      {screen === 'end' && (
+        <EndScreen
+          elapsed={endStats.elapsed}
+          msgCount={endStats.msgCount}
+          onNew={() => setScreen('setup')}
+          theme={theme} />
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<TradutorApp />);
+  </script>
+</body>
+</html>
