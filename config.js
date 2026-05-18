@@ -18,6 +18,6 @@
 window.TRADUTOR_CONFIG = {
   DEFAULT_API_KEY: 'AIzaSyDt28vDm1vO30JBniOAhwgKWFtsuArtxI0',
   DEFAULT_LANGUAGE_PAIR: 'pt-en',
-  // 'us' = inglês americano | 'uk' = inglês britânico
   DEFAULT_ENGLISH_VARIANT: 'us',
+  GEMINI_MODEL: 'models/gemini-3.1-flash-lite',
 };
