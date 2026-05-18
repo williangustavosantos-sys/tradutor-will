@@ -431,6 +431,9 @@ function useTranslator() {
         }
       }
     }
+    if (sc.inputTranscription?.text) {
+      appendTranslation(sc.inputTranscription.text);
+    }
     if (sc.outputTranscription?.text) {
       appendTranslation(sc.outputTranscription.text);
     }
@@ -509,7 +512,7 @@ function useTranslator() {
       const b64 = arrayBufferToBase64(e.data);
       wsRef.current.send(JSON.stringify({
         realtimeInput: {
-          mediaChunks: [{ mimeType: 'audio/pcm;rate=16000', data: b64 }]
+          audio: { mimeType: 'audio/pcm;rate=16000', data: b64 }
         }
       }));
     };
@@ -584,10 +587,7 @@ function useTranslator() {
     if (!text || !text.trim()) return;
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     wsRef.current.send(JSON.stringify({
-      clientContent: {
-        turns: [{ role: 'user', parts: [{ text: text.trim() }] }],
-        turnComplete: true,
-      }
+      realtimeInput: { text: text.trim() }
     }));
   }
 
