@@ -343,29 +343,80 @@ function useTranslator() {
   const audioOnRef = React.useRef(true);
   const micOnRef = React.useRef(true);
   const statusRef = React.useRef('idle');
+  const lastInputLangRef = React.useRef(null);
+  const outputTargetRef = React.useRef(null);
+  const outputAccumRef = React.useRef(false);
 
   React.useEffect(() => { pausedRef.current = paused; }, [paused]);
   React.useEffect(() => { audioOnRef.current = audioOn; }, [audioOn]);
   React.useEffect(() => { micOnRef.current = micOn; }, [micOn]);
   React.useEffect(() => { statusRef.current = status; }, [status]);
 
-  function appendTranslation(text) {
+  // Rota transcrição de INPUT (o que o usuário disse) pelo idioma detectado
+  function appendInputTranscription(text) {
     if (!text || !text.trim()) return;
     const cfg = configRef.current;
     if (!cfg) return;
     const a = langById(cfg.langA), b = langById(cfg.langB);
     if (!a || !b) return;
 
+    // Nova entrada = reset do acumulador de output
+    outputTargetRef.current = null;
+    outputAccumRef.current = false;
+
     const detected = detectBase(text);
+    lastInputLangRef.current = detected;
+
     let target;
     if (detected === a.base && detected !== b.base) target = 'A';
     else if (detected === b.base && detected !== a.base) target = 'B';
-    else {
-      // Fallback: alterna baseado em qual lado tem menos mensagens
-      target = transA.length <= transB.length ? 'A' : 'B';
-    }
+    else target = transA.length <= transB.length ? 'A' : 'B';
+
     if (target === 'A') setTransA(prev => [...prev, text]);
     else setTransB(prev => [...prev, text]);
+  }
+
+  // Rota transcrição de OUTPUT (tradução gerada) para o lado OPOSTO ao input
+  // e acumula fragmentos da mesma resposta em um único item
+  function appendOutputTranscription(text) {
+    if (!text || !text.trim()) return;
+    const cfg = configRef.current;
+    if (!cfg) return;
+    const a = langById(cfg.langA), b = langById(cfg.langB);
+    if (!a || !b) return;
+
+    let target = outputTargetRef.current;
+    if (!target) {
+      const inputLang = lastInputLangRef.current;
+      // Output vai para o lado OPOSTO ao input
+      if (inputLang === a.base && inputLang !== b.base) target = 'B';
+      else if (inputLang === b.base && inputLang !== a.base) target = 'A';
+      else {
+        // Sem histórico de input: detecta pelo próprio fragmento
+        const det = detectBase(text);
+        if (det === a.base && det !== b.base) target = 'A';
+        else if (det === b.base && det !== a.base) target = 'B';
+        else target = 'B'; // default para o lado B
+      }
+      outputTargetRef.current = target;
+    }
+
+    const isAccumulating = outputAccumRef.current;
+    outputAccumRef.current = true;
+
+    if (target === 'A') {
+      setTransA(prev => {
+        if (isAccumulating && prev.length > 0)
+          return [...prev.slice(0, -1), prev[prev.length - 1] + ' ' + text];
+        return [...prev, text];
+      });
+    } else {
+      setTransB(prev => {
+        if (isAccumulating && prev.length > 0)
+          return [...prev.slice(0, -1), prev[prev.length - 1] + ' ' + text];
+        return [...prev, text];
+      });
+    }
   }
 
   function playAudioChunk(b64) {
@@ -432,10 +483,10 @@ function useTranslator() {
       }
     }
     if (sc.inputTranscription?.text) {
-      appendTranslation(sc.inputTranscription.text);
+      appendInputTranscription(sc.inputTranscription.text);
     }
     if (sc.outputTranscription?.text) {
-      appendTranslation(sc.outputTranscription.text);
+      appendOutputTranscription(sc.outputTranscription.text);
     }
     if (sc.interrupted) interruptPlayback();
   }
@@ -546,6 +597,9 @@ function useTranslator() {
     }
     setError(null);
     setTransA([]); setTransB([]);
+    lastInputLangRef.current = null;
+    outputTargetRef.current = null;
+    outputAccumRef.current = false;
     setAudioOn(config.audio !== false);
     setMicOn(true);
     setPaused(false);
