@@ -338,7 +338,7 @@ async function searchInternet(query, langId) {
         contents: [{ role: 'user', parts: [{ text: query.trim() }] }],
         tools: [{ googleSearch: {} }],
         systemInstruction: {
-          parts: [{ text: `Responda em ${lang?.label || 'português'}. Seja direto, até 5 frases.` }],
+          parts: [{ text: `Responda em ${lang?.label || 'português'}. Seja extremamente direto e curto: máximo 2 frases, sem introdução, sem explicação extra.` }],
         },
       }),
     }
