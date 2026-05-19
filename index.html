@@ -52,6 +52,13 @@
       from { opacity: 0; }
       to { opacity: 1; }
     }
+
+    @keyframes splashLogo {
+      0%   { opacity: 0; transform: scale(0.82); }
+      35%  { opacity: 1; transform: scale(1.02); }
+      55%  { transform: scale(1); }
+      100% { opacity: 1; transform: scale(1); }
+    }
   </style>
 </head>
 <body>
@@ -730,7 +737,6 @@ function useTranslator() {
         systemInstruction: { parts: [{ text: buildSystemPrompt(cfg.langA, cfg.langB) }] },
         outputAudioTranscription: {},
         inputAudioTranscription: {},
-        realtimeInputConfig: { automaticActivityDetection: {} },
       }
     }));
   }
@@ -1819,22 +1825,12 @@ function EndScreen({ elapsed, msgCount, history, onNew, theme }) {
 // SPLASH SCREEN
 // ==========================================
 function SplashScreen({ onDone }) {
-  const videoRef = React.useRef(null);
   const [fadeOut, setFadeOut] = React.useState(false);
 
   React.useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    const onEnd = () => {
-      setFadeOut(true);
-      setTimeout(onDone, 500);
-    };
-    v.addEventListener('ended', onEnd);
-    v.play().catch(() => {
-      setTimeout(onDone, 800);
-    });
-    const fallback = setTimeout(onDone, 2000);
-    return () => { v.removeEventListener('ended', onEnd); clearTimeout(fallback); };
+    const showTimer = setTimeout(() => setFadeOut(true), 1600);
+    const doneTimer = setTimeout(onDone, 2050);
+    return () => { clearTimeout(showTimer); clearTimeout(doneTimer); };
   }, []);
 
   return (
@@ -1845,17 +1841,10 @@ function SplashScreen({ onDone }) {
       opacity: fadeOut ? 0 : 1,
       transition: 'opacity 0.45s ease-out',
     }}>
-      <video
-        ref={videoRef}
-        muted
-        playsInline
-        preload="auto"
-        style={{ width: '65vmin', height: '65vmin', objectFit: 'contain', mixBlendMode: 'multiply' }}
-      >
-        <source src="logo-animado.mp4" type="video/mp4" />
-        <source src="splash.webm" type="video/webm" />
-        <source src="splash.mp4" type="video/mp4" />
-      </video>
+      <img src="logo.png" alt="Will Translator" style={{
+        width: 'min(58vmin, 320px)', height: 'auto',
+        animation: 'splashLogo 1.2s cubic-bezier(0.16, 1, 0.3, 1) forwards',
+      }} />
     </div>
   );
 }
