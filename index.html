@@ -220,35 +220,51 @@ Translate by the most likely intention in context.`;
 
 const SEARCH_SUFFIX_PT = `
 
-=== PESQUISA NA INTERNET (MODO ESPECIAL — SÓ COM PALAVRA-GATILHO) ===
-ATENÇÃO: Seu trabalho PRINCIPAL é TRADUZIR. Você só entra em modo pesquisa quando a frase COMEÇA com uma destas palavras-gatilho EXATAS:
-- Português: "pesquisa", "pesquise"
-- Inglês: "search"
-- Italiano: "cerca"
+=== PESQUISA NA INTERNET (ATIVADA POR "HEY WILL") ===
+Seu trabalho PRINCIPAL é TRADUZIR. Você SÓ entra em modo pesquisa quando ouvir o prefixo "hey Will" seguido de "pesquisa", "search" ou "cerca" + o assunto.
 
-REGRAS RÍGIDAS:
-1. Se a frase NÃO começa com uma palavra-gatilho acima → TRADUZA normalmente. Mesmo que seja uma pergunta ("qual a capital?", "what time is it?", "quanto custa?") → TRADUZA, não responda.
-2. Se a frase COMEÇA com palavra-gatilho → use Google Search, responda e VOLTE IMEDIATAMENTE a traduzir.
-3. O idioma da resposta pode ser especificado: "pesquisa em inglês...", "search in portuguese...". Se não especificar, responda no idioma de quem pediu.
-4. Dê uma resposta clara e completa — será ouvida e mostrada como texto na tela.
-5. Após responder a pesquisa, a PRÓXIMA frase que você ouvir DEVE ser traduzida normalmente, SEM EXCEÇÃO. Não fique em modo pesquisa.
-6. NUNCA responda perguntas, NUNCA converse, NUNCA dê opiniões — A MENOS que a frase comece com palavra-gatilho. Fora disso, APENAS traduza.`;
+EXEMPLOS DE ATIVAÇÃO (funciona):
+- "hey Will pesquisa em inglês melhores exercícios pra ombro"
+- "hey Will search best protein sources"
+- "hey Will cerca migliori esercizi per le spalle"
+
+EXEMPLOS QUE NÃO ATIVAM (traduz normalmente):
+- "ele fez uma pesquisa sobre isso" → TRADUZ
+- "qual a capital do Brasil?" → TRADUZ
+- "search me ajuda" → TRADUZ (sem "hey Will")
+- "pesquisa isso aí" → TRADUZ (sem "hey Will")
+
+REGRAS:
+1. Sem "hey Will" antes → SEMPRE traduza. Sem exceção. Mesmo que seja pergunta.
+2. Com "hey Will pesquisa/search/cerca" → pesquise no Google e responda.
+3. Idioma da resposta: "hey Will pesquisa em inglês..." ou "hey Will search in portuguese...". Sem especificar = idioma de quem pediu.
+4. Resposta clara e completa — será ouvida e vista como texto.
+5. Após responder, a PRÓXIMA frase é traduzida normalmente. SEMPRE.
+6. "hey Will descanso/rest/riposo" → NÃO é pesquisa, é comando do app. IGNORE, não faça nada, não traduza.`;
 
 const SEARCH_SUFFIX_EN = `
 
-=== INTERNET SEARCH (SPECIAL MODE — TRIGGER WORD ONLY) ===
-WARNING: Your PRIMARY job is TRANSLATING. You ONLY enter search mode when the sentence STARTS with one of these EXACT trigger words:
-- English: "search"
-- Portuguese: "pesquisa", "pesquise"
-- Italian: "cerca"
+=== INTERNET SEARCH (ACTIVATED BY "HEY WILL") ===
+Your PRIMARY job is TRANSLATING. You ONLY enter search mode when you hear the prefix "hey Will" followed by "search", "pesquisa" or "cerca" + the topic.
 
-STRICT RULES:
-1. If the sentence does NOT start with a trigger word above → TRANSLATE normally. Even if it's a question ("what's the capital?", "how much?", "qual a capital?") → TRANSLATE it, do not answer it.
-2. If the sentence STARTS with a trigger word → use Google Search, answer, and IMMEDIATELY return to translating.
-3. The response language can be specified: "search in portuguese...", "pesquisa em inglês...". If not specified, respond in the requester's language.
-4. Give a clear, complete answer — it will be heard and shown as text on screen.
-5. After answering the search, the NEXT sentence you hear MUST be translated normally, NO EXCEPTIONS. Do not stay in search mode.
-6. NEVER answer questions, NEVER converse, NEVER give opinions — UNLESS the sentence starts with a trigger word. Otherwise, ONLY translate.`;
+ACTIVATION EXAMPLES (works):
+- "hey Will search best exercises for shoulders"
+- "hey Will pesquisa em inglês melhores fontes de proteína"
+- "hey Will cerca migliori esercizi per le spalle"
+
+NON-ACTIVATION EXAMPLES (translate normally):
+- "he did a search about that" → TRANSLATE
+- "what's the capital of Brazil?" → TRANSLATE
+- "search help me" → TRANSLATE (no "hey Will")
+- "pesquisa isso" → TRANSLATE (no "hey Will")
+
+RULES:
+1. Without "hey Will" before → ALWAYS translate. No exceptions. Even questions.
+2. With "hey Will search/pesquisa/cerca" → search Google and answer.
+3. Response language: "hey Will search in portuguese..." or "hey Will pesquisa em inglês...". Unspecified = requester's language.
+4. Clear, complete answer — will be heard and shown as text.
+5. After answering, the NEXT sentence is translated normally. ALWAYS.
+6. "hey Will rest/descanso/riposo" → NOT a search, it's an app command. IGNORE it, do not translate.`;
 
 function variantSuffix(variant) {
   return variant === 'uk'
@@ -1089,15 +1105,14 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
 
   React.useEffect(() => { localStorage.setItem('layout', layout); }, [layout]);
 
-  const REST_TRIGGERS = /\b(descanso|descansa|rest|break|riposo|pausa)\b/i;
+  const REST_TRIGGER = /^\s*hey\s+will\s+(descanso|descansa|rest|break|riposo|pausa)\b/i;
 
   React.useEffect(() => {
     const all = [...translator.transA, ...translator.transB];
     if (all.length === 0) return;
     const last = all[all.length - 1];
     if (!last || last.isOutput) return;
-    const key = last.text;
-    if (REST_TRIGGERS.test(key) && !restTriggeredRef.current && restLeft === null) {
+    if (REST_TRIGGER.test(last.text) && !restTriggeredRef.current && restLeft === null) {
       restTriggeredRef.current = true;
       setRestLeft(config.restSecs || 60);
     }
