@@ -62,18 +62,34 @@
 // CONFIG (carregado de config.js)
 // ==========================================
 const APP_CONFIG = window.TRADUTOR_CONFIG || {};
-const GEMINI_MODEL = APP_CONFIG.GEMINI_MODEL || 'models/gemini-2.0-flash-exp';
+const GEMINI_MODEL = APP_CONFIG.GEMINI_MODEL || 'models/gemini-3.1-flash-live-preview';
+const GEMINI_REST_MODEL = (APP_CONFIG.GEMINI_REST_MODEL || 'gemini-2.0-flash').replace(/^models\//, '');
+const MAX_TRANSLATIONS = 60; // evita crescimento infinito em sessões longas (~90 min)
 
-const VOICES = [
-  { id: 'Aoede',  gender: 'F', desc: 'Melodiosa' },
-  { id: 'Kore',   gender: 'F', desc: 'Firme' },
-  { id: 'Leda',   gender: 'F', desc: 'Jovem' },
-  { id: 'Zephyr', gender: 'F', desc: 'Suave' },
-  { id: 'Puck',   gender: 'M', desc: 'Animado' },
-  { id: 'Charon', gender: 'M', desc: 'Grave' },
-  { id: 'Fenrir', gender: 'M', desc: 'Energético' },
-  { id: 'Orus',   gender: 'M', desc: 'Firme' },
-];
+function geminiRestUrl(method) {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_REST_MODEL}:${method || 'generateContent'}`;
+}
+
+// #region agent log
+const DEBUG_LOG = (location, message, data, hypothesisId) => {
+  fetch('http://127.0.0.1:7523/ingest/57946b5f-3a7e-40ac-9048-8872c7b4ff4c', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '5a4655' },
+    body: JSON.stringify({ sessionId: '5a4655', location, message, data, timestamp: Date.now(), hypothesisId }),
+  }).catch(() => {});
+};
+// #endregion
+
+const VOICE_BY_GENDER = {
+  F: { id: 'Aoede', label: 'Voz feminina' },
+  M: { id: 'Charon', label: 'Voz masculina' },
+};
+
+const VOICE_SAMPLE_PHRASE = {
+  pt: 'Olá! Esta é a voz que vai traduzir para você.',
+  en: 'Hello! This is the voice that will translate for you.',
+  it: 'Ciao! Questa è la voce che tradurrà per te.',
+};
 
 // ==========================================
 // LANGUAGES
@@ -218,54 +234,6 @@ COMMON EXPRESSIONS:
 
 Translate by the most likely intention in context.`;
 
-const SEARCH_SUFFIX_PT = `
-
-=== PESQUISA NA INTERNET (ATIVADA POR "HEY WILL") ===
-Seu trabalho PRINCIPAL é TRADUZIR. Você SÓ entra em modo pesquisa quando ouvir o prefixo "hey Will" seguido de "pesquisa", "search" ou "cerca" + o assunto.
-
-EXEMPLOS DE ATIVAÇÃO (funciona):
-- "hey Will pesquisa em inglês melhores exercícios pra ombro"
-- "hey Will search best protein sources"
-- "hey Will cerca migliori esercizi per le spalle"
-
-EXEMPLOS QUE NÃO ATIVAM (traduz normalmente):
-- "ele fez uma pesquisa sobre isso" → TRADUZ
-- "qual a capital do Brasil?" → TRADUZ
-- "search me ajuda" → TRADUZ (sem "hey Will")
-- "pesquisa isso aí" → TRADUZ (sem "hey Will")
-
-REGRAS:
-1. Sem "hey Will" antes → SEMPRE traduza. Sem exceção. Mesmo que seja pergunta.
-2. Com "hey Will pesquisa/search/cerca" → pesquise no Google e responda.
-3. Idioma da resposta: "hey Will pesquisa em inglês..." ou "hey Will search in portuguese...". Sem especificar = idioma de quem pediu.
-4. Resposta clara e completa — será ouvida e vista como texto.
-5. Após responder, a PRÓXIMA frase é traduzida normalmente. SEMPRE.
-6. "hey Will descanso/rest/riposo/break/pausa/descansa" → é comando do app, NÃO é pra você. Fique em SILÊNCIO ABSOLUTO. Não fale nada, não traduza, não responda, não reconheça. Zero output. Espere a próxima frase real para traduzir.`;
-
-const SEARCH_SUFFIX_EN = `
-
-=== INTERNET SEARCH (ACTIVATED BY "HEY WILL") ===
-Your PRIMARY job is TRANSLATING. You ONLY enter search mode when you hear the prefix "hey Will" followed by "search", "pesquisa" or "cerca" + the topic.
-
-ACTIVATION EXAMPLES (works):
-- "hey Will search best exercises for shoulders"
-- "hey Will pesquisa em inglês melhores fontes de proteína"
-- "hey Will cerca migliori esercizi per le spalle"
-
-NON-ACTIVATION EXAMPLES (translate normally):
-- "he did a search about that" → TRANSLATE
-- "what's the capital of Brazil?" → TRANSLATE
-- "search help me" → TRANSLATE (no "hey Will")
-- "pesquisa isso" → TRANSLATE (no "hey Will")
-
-RULES:
-1. Without "hey Will" before → ALWAYS translate. No exceptions. Even questions.
-2. With "hey Will search/pesquisa/cerca" → search Google and answer.
-3. Response language: "hey Will search in portuguese..." or "hey Will pesquisa em inglês...". Unspecified = requester's language.
-4. Clear, complete answer — will be heard and shown as text.
-5. After answering, the NEXT sentence is translated normally. ALWAYS.
-6. "hey Will rest/descanso/riposo/break/pausa/descansa" → app command, NOT for you. Stay COMPLETELY SILENT. Do not speak, do not translate, do not acknowledge, do not respond. Zero output. Wait for the next real sentence to translate.`;
-
 function variantSuffix(variant) {
   return variant === 'uk'
     ? `\n\n=== VARIANTE DE INGLÊS: BRITÂNICO (EN-GB) ===\n` +
@@ -298,8 +266,72 @@ function buildSystemPrompt(langAId, langBId) {
     base = base + variantSuffix(variant);
   }
 
-  const searchSuffix = bases.has('en') && !bases.has('pt') ? SEARCH_SUFFIX_EN : SEARCH_SUFFIX_PT;
-  return base + searchSuffix;
+  return base;
+}
+
+// Extrai idioma da resposta e limpa a pergunta (ex.: "... responde em inglês")
+function parseSearchRequest(text, config, defaultLangId) {
+  let query = (text || '').trim();
+  let langId = defaultLangId || config.langA;
+
+  const pickByBase = (base) => {
+    const ids = [config.langA, config.langB];
+    const inSession = ids.find(id => langById(id)?.base === base);
+    if (inSession) return inSession;
+    if (base === 'pt') return 'pt-BR';
+    if (base === 'en') return ids.find(id => langById(id)?.base === 'en') || 'en-US';
+    if (base === 'it') return 'it';
+    return defaultLangId || config.langA;
+  };
+
+  const rules = [
+    { re: /(?:^|[\s,.])(?:responde|responder|fala|falar|diz|diga|em)\s+(?:em\s+)?portugu[eê]s(?:\s+brasileiro)?\s*[,:.\-]?\s*/gi, base: 'pt' },
+    { re: /(?:^|[\s,.])(?:respond|answer|speak|say|in)\s+(?:in\s+)?(?:english|ingl[eê]s)\s*[,:.\-]?\s*/gi, base: 'en' },
+    { re: /(?:^|[\s,.])(?:rispondi|rispondere|parla|in)\s+(?:in\s+)?italiano\s*[,:.\-]?\s*/gi, base: 'it' },
+    { re: /(?:^|[\s,.])(?:em\s+)?portugu[eê]s\s*[,:.\-]?\s*$/gi, base: 'pt' },
+    { re: /(?:^|[\s,.])(?:in\s+)?(?:english|ingl[eê]s)\s*[,:.\-]?\s*$/gi, base: 'en' },
+    { re: /(?:^|[\s,.])(?:in\s+)?italiano\s*[,:.\-]?\s*$/gi, base: 'it' },
+    { re: /\b(responde|responder)\s+em\s+(pt|portugu[eê]s)\b/gi, base: 'pt' },
+    { re: /\b(respond|answer)\s+in\s+(en|english|ingl[eê]s)\b/gi, base: 'en' },
+    { re: /\b(rispondi|rispondere)\s+in\s+(it|italiano)\b/gi, base: 'it' },
+  ];
+
+  for (const { re, base } of rules) {
+    if (re.test(query)) {
+      langId = pickByBase(base);
+      query = query.replace(re, ' ').replace(/\s+/g, ' ').trim();
+      re.lastIndex = 0;
+    }
+  }
+
+  if (!query) query = (text || '').trim();
+  return { query, langId };
+}
+
+// Pesquisa na internet (API REST separada — não interfere no tradutor ao vivo)
+async function searchInternet(query, langId) {
+  const lang = langById(langId);
+  const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
+  if (!apiKey) throw new Error('Falta a API key (config.js).');
+  const res = await fetch(
+    `${geminiRestUrl('generateContent')}?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: query.trim() }] }],
+        tools: [{ googleSearch: {} }],
+        systemInstruction: {
+          parts: [{ text: `Responda em ${lang?.label || 'português'}. Seja direto, até 5 frases.` }],
+        },
+      }),
+    }
+  );
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || 'Erro na pesquisa');
+  const parts = data.candidates?.[0]?.content?.parts || [];
+  const text = parts.map(p => p.text).filter(Boolean).join('\n');
+  return text || 'Não encontrei resposta.';
 }
 
 // ==========================================
@@ -376,6 +408,123 @@ function int16ToFloat32(int16) {
   return f;
 }
 
+let previewAudioCtx = null;
+let previewVoiceAbort = null;
+
+// Preview usa a mesma Live API e o mesmo modelo da sessão (áudio não funciona no REST)
+async function playVoiceSample(voiceName, langId) {
+  if (previewVoiceAbort) previewVoiceAbort();
+
+  const lang = langById(langId);
+  const base = lang?.base || 'pt';
+  const phrase = VOICE_SAMPLE_PHRASE[base] || VOICE_SAMPLE_PHRASE.pt;
+  const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
+  if (!apiKey) throw new Error('Falta a API key (config.js).');
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let ws = null;
+    let nextPlay = 0;
+    let heardAudio = false;
+
+    const done = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      previewVoiceAbort = null;
+      if (ws) { try { ws.close(); } catch (_) {} ws = null; }
+      if (err) reject(err);
+      else resolve();
+    };
+
+    previewVoiceAbort = () => done(new Error('Cancelado'));
+
+    const timer = setTimeout(() => done(new Error('Tempo esgotado ao ouvir a voz')), 15000);
+
+    if (!previewAudioCtx) previewAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = previewAudioCtx;
+
+    function queueChunk(b64) {
+      const int16 = new Int16Array(base64ToArrayBuffer(b64));
+      const f32 = int16ToFloat32(int16);
+      if (f32.length === 0) return;
+      heardAudio = true;
+      const ab = ctx.createBuffer(1, f32.length, 24000);
+      ab.copyToChannel(f32, 0);
+      const src = ctx.createBufferSource();
+      src.buffer = ab;
+      src.connect(ctx.destination);
+      const at = Math.max(nextPlay, ctx.currentTime);
+      src.start(at);
+      nextPlay = at + ab.duration;
+    }
+
+    const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`;
+    ws = new WebSocket(url);
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        setup: {
+          model: GEMINI_MODEL,
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
+            temperature: 0.2,
+          },
+          systemInstruction: {
+            parts: [{ text: 'Repita em voz alta, com entonação natural, exatamente o texto que o usuário enviar. Não acrescente nada.' }],
+          },
+        },
+      }));
+    };
+
+    ws.onmessage = async (e) => {
+      const raw = e.data instanceof Blob ? await e.data.text() : e.data;
+      let msg;
+      try { msg = JSON.parse(raw); } catch (_) { return; }
+
+      if (msg.error) {
+        done(new Error(msg.error.message || 'Erro ao ouvir a voz'));
+        return;
+      }
+
+      if (msg.setupComplete !== undefined) {
+        ws.send(JSON.stringify({
+          clientContent: {
+            turns: [{ role: 'user', parts: [{ text: phrase }] }],
+            turnComplete: true,
+          },
+        }));
+        return;
+      }
+
+      const sc = msg.serverContent;
+      if (!sc) return;
+
+      if (sc.modelTurn?.parts) {
+        if (ctx.state === 'suspended') await ctx.resume();
+        for (const part of sc.modelTurn.parts) {
+          if (part.inlineData?.mimeType?.startsWith('audio/pcm') && part.inlineData.data) {
+            queueChunk(part.inlineData.data);
+          }
+        }
+      }
+
+      if (sc.turnComplete) {
+        if (!heardAudio) {
+          done(new Error('Nenhum áudio recebido'));
+          return;
+        }
+        const waitMs = Math.max(400, (nextPlay - ctx.currentTime) * 1000 + 250);
+        setTimeout(() => done(), waitMs);
+      }
+    };
+
+    ws.onerror = () => done(new Error('Erro de conexão ao ouvir a voz'));
+    ws.onclose = () => { if (!settled && !heardAudio) done(new Error('Conexão fechada')); };
+  });
+}
+
 // ==========================================
 // HOOK: useTranslator
 // ==========================================
@@ -388,10 +537,6 @@ function useTranslator() {
   const [error, setError] = React.useState(null);
   const [transA, setTransA] = React.useState([]);
   const [transB, setTransB] = React.useState([]);
-  const [fontSize, setFontSize] = React.useState(() => parseInt(localStorage.getItem('fontSize')) || 28);
-  const [dimmer, setDimmer] = React.useState(false);
-  const [searching, setSearching] = React.useState(false);
-
   const configRef = React.useRef(null);
   const wsRef = React.useRef(null);
   const inputCtxRef = React.useRef(null);
@@ -413,18 +558,26 @@ function useTranslator() {
   const outputAccumRef = React.useRef(false);
   const isPlayingAudioRef = React.useRef(false);
   const playEndTimeoutRef = React.useRef(null);
+  const transLenRef = React.useRef({ A: 0, B: 0 });
+  const searchModeRef = React.useRef(false);
+  const searchOnUtteranceRef = React.useRef(null);
+  const searchUtteranceBufRef = React.useRef('');
 
   React.useEffect(() => { pausedRef.current = paused; }, [paused]);
   React.useEffect(() => { audioOnRef.current = audioOn; }, [audioOn]);
   React.useEffect(() => { micOnRef.current = micOn; }, [micOn]);
   React.useEffect(() => { statusRef.current = status; }, [status]);
-  React.useEffect(() => { localStorage.setItem('fontSize', fontSize); }, [fontSize]);
-
   function resetTranscriptionState() {
     lastInputLangRef.current = null;
     outputTargetRef.current = null;
     inputAccumRef.current = false;
     outputAccumRef.current = false;
+  }
+
+  function beginNewTurn() {
+    inputAccumRef.current = false;
+    outputAccumRef.current = false;
+    outputTargetRef.current = null;
   }
 
   function resolveTarget(detected, a, b) {
@@ -433,13 +586,35 @@ function useTranslator() {
     return null;
   }
 
+  function setSearchMode(on, onUtterance) {
+    searchModeRef.current = !!on;
+    searchOnUtteranceRef.current = on ? onUtterance : null;
+    if (!on) {
+      searchUtteranceBufRef.current = '';
+    }
+  }
+
   // INPUT: o que foi dito (mic) ou digitado. Incremental = SUBSTITUI último item do mesmo turno.
-  function appendInputTranscription(text) {
+  function appendInputTranscription(text, opts) {
     if (!text || !text.trim()) return;
+
+    if (searchModeRef.current) {
+      const isAccum = inputAccumRef.current;
+      if (!isAccum && !opts?.skipBeginTurn) beginNewTurn();
+      inputAccumRef.current = true;
+      searchUtteranceBufRef.current = isAccum
+        ? (searchUtteranceBufRef.current + ' ' + text).trim()
+        : text.trim();
+      return;
+    }
+
     const cfg = configRef.current;
     if (!cfg) return;
     const a = langById(cfg.langA), b = langById(cfg.langB);
     if (!a || !b) return;
+
+    const isAccum = inputAccumRef.current;
+    if (!isAccum && !opts?.skipBeginTurn) beginNewTurn();
 
     outputTargetRef.current = null;
     outputAccumRef.current = false;
@@ -448,20 +623,22 @@ function useTranslator() {
     if (detected) lastInputLangRef.current = detected;
 
     const target = resolveTarget(detected, a, b) || 'A';
-    const isAccum = inputAccumRef.current;
     inputAccumRef.current = true;
 
     const entry = { text, isOutput: false };
     const setter = target === 'A' ? setTransA : setTransB;
     setter(prev => {
-      if (isAccum && prev.length > 0) return [...prev.slice(0, -1), entry];
-      return [...prev, entry];
+      const next = isAccum && prev.length > 0 ? [...prev.slice(0, -1), entry] : [...prev, entry];
+      const capped = next.length > MAX_TRANSLATIONS ? next.slice(-MAX_TRANSLATIONS) : next;
+      transLenRef.current[target] = capped.length;
+      return capped;
     });
   }
 
   // OUTPUT: a tradução gerada pelo modelo. Vai pro lado OPOSTO ao input.
   // Fragmentos da mesma resposta CONCATENAM no mesmo item.
   function appendOutputTranscription(text) {
+    if (searchModeRef.current) return;
     if (!text || !text.trim()) return;
     const cfg = configRef.current;
     if (!cfg) return;
@@ -487,18 +664,27 @@ function useTranslator() {
 
     const setter = target === 'A' ? setTransA : setTransB;
     setter(prev => {
+      let next;
       if (isAccum && prev.length > 0) {
         const last = prev[prev.length - 1];
-        return [...prev.slice(0, -1), { text: last.text + ' ' + text, isOutput: true }];
+        next = [...prev.slice(0, -1), { text: last.text + ' ' + text, isOutput: true }];
+      } else {
+        next = [...prev, { text, isOutput: true }];
       }
-      return [...prev, { text, isOutput: true }];
+      const capped = next.length > MAX_TRANSLATIONS ? next.slice(-MAX_TRANSLATIONS) : next;
+      transLenRef.current[target] = capped.length;
+      return capped;
     });
 
     if (navigator.vibrate) navigator.vibrate(50);
   }
 
   function playAudioChunk(b64) {
-    if (!audioOnRef.current) return;
+    if (searchModeRef.current) return;
+    if (!audioOnRef.current) {
+      isPlayingAudioRef.current = false;
+      return;
+    }
     if (!outputCtxRef.current) return;
     const buf = base64ToArrayBuffer(b64);
     const int16 = new Int16Array(buf);
@@ -540,7 +726,6 @@ function useTranslator() {
           temperature: 0.3,
         },
         systemInstruction: { parts: [{ text: buildSystemPrompt(cfg.langA, cfg.langB) }] },
-        tools: [{ googleSearch: {} }],
         outputAudioTranscription: {},
         inputAudioTranscription: {},
       }
@@ -552,19 +737,15 @@ function useTranslator() {
     try { msg = JSON.parse(text); } catch (e) { return; }
     if (msg.error) {
       const errMsg = msg.error.message || 'Erro da API Gemini';
+      // #region agent log
+      DEBUG_LOG('index.html:handleServerMessage', 'API error', { errMsg, status: statusRef.current }, 'C');
+      // #endregion
+      setError(errMsg);
       if (rejectSetup) rejectSetup(new Error(errMsg));
       return;
     }
     if (msg.setupComplete !== undefined) {
       if (resolveSetup) resolveSetup();
-      return;
-    }
-    if (msg.toolCall) {
-      setSearching(true);
-      return;
-    }
-    if (msg.toolCallCancellation) {
-      setSearching(false);
       return;
     }
     const sc = msg.serverContent;
@@ -575,7 +756,6 @@ function useTranslator() {
           playAudioChunk(part.inlineData.data);
         }
       }
-      if (searching) setSearching(false);
     }
     if (sc.inputTranscription?.text) {
       appendInputTranscription(sc.inputTranscription.text);
@@ -584,16 +764,22 @@ function useTranslator() {
       appendOutputTranscription(sc.outputTranscription.text);
     }
     if (sc.turnComplete) {
-      inputAccumRef.current = false;
-      outputAccumRef.current = false;
-      outputTargetRef.current = null;
-      if (searching) setSearching(false);
+      if (searchModeRef.current && searchUtteranceBufRef.current.trim()) {
+        const utterance = searchUtteranceBufRef.current.trim();
+        searchUtteranceBufRef.current = '';
+        inputAccumRef.current = false;
+        const cb = searchOnUtteranceRef.current;
+        if (cb) cb(utterance);
+      } else {
+        inputAccumRef.current = false;
+        outputAccumRef.current = false;
+        outputTargetRef.current = null;
+      }
     }
     if (sc.interrupted) {
       interruptPlayback();
       outputAccumRef.current = false;
       outputTargetRef.current = null;
-      if (searching) setSearching(false);
     }
   }
 
@@ -616,6 +802,11 @@ function useTranslator() {
       };
       ws.onerror = () => fail(new Error('Erro de conexão com a API'));
       ws.onclose = (ev) => {
+        // #region agent log
+        DEBUG_LOG('index.html:ws.onclose', 'WebSocket closed', {
+          code: ev.code, reason: ev.reason, status: statusRef.current, reconnect: reconnectRef.current,
+        }, 'C');
+        // #endregion
         if (!settled) {
           fail(new Error(ev.reason || 'Conexão fechada antes de completar setup'));
           return;
@@ -646,9 +837,16 @@ function useTranslator() {
     }, delay);
   }
 
+  async function resumeAudioContexts() {
+    for (const ctx of [inputCtxRef.current, outputCtxRef.current]) {
+      if (ctx && ctx.state === 'suspended') await ctx.resume();
+    }
+  }
+
   async function initAudio() {
     inputCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     outputCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+    await resumeAudioContexts();
     nextPlayTimeRef.current = outputCtxRef.current.currentTime;
 
     await inputCtxRef.current.audioWorklet.addModule('mic-worklet.js');
@@ -665,7 +863,6 @@ function useTranslator() {
     workletRef.current = new AudioWorkletNode(inputCtxRef.current, 'mic-processor');
     workletRef.current.port.onmessage = (e) => {
       if (pausedRef.current || !micOnRef.current) return;
-      if (isPlayingAudioRef.current) return;
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
       const b64 = arrayBufferToBase64(e.data);
       wsRef.current.send(JSON.stringify({
@@ -687,7 +884,18 @@ function useTranslator() {
     startTimeRef.current = Date.now();
     setElapsed(0);
     timerRef.current = setInterval(() => {
-      setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000));
+      const secs = Math.floor((Date.now() - startTimeRef.current) / 1000);
+      setElapsed(secs);
+      if (secs > 0 && secs % 300 === 0) {
+        // #region agent log
+        DEBUG_LOG('index.html:sessionTimer', 'Session health', {
+          elapsedSecs: secs,
+          transA: transLenRef.current.A,
+          transB: transLenRef.current.B,
+          wsOpen: wsRef.current?.readyState === 1,
+        }, 'B');
+        // #endregion
+      }
     }, 1000);
   }
   function stopTimer() {
@@ -696,6 +904,7 @@ function useTranslator() {
   }
 
   async function start(config) {
+    if (statusRef.current !== 'idle') return false;
     configRef.current = config;
     const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
     if (!apiKey) {
@@ -704,7 +913,11 @@ function useTranslator() {
     }
     setError(null);
     setTransA([]); setTransB([]);
+    transLenRef.current = { A: 0, B: 0 };
     resetTranscriptionState();
+    searchModeRef.current = false;
+    searchOnUtteranceRef.current = null;
+    searchUtteranceBufRef.current = '';
     setAudioOn(config.audio !== false);
     setMicOn(true);
     setPaused(false);
@@ -715,8 +928,14 @@ function useTranslator() {
       setStatus('active');
       startTimer();
       await requestWakeLock();
+      // #region agent log
+      DEBUG_LOG('index.html:start', 'Session started', { langA: config.langA, langB: config.langB, model: GEMINI_MODEL }, 'C');
+      // #endregion
       return true;
     } catch (e) {
+      // #region agent log
+      DEBUG_LOG('index.html:start', 'Session start failed', { error: e.message }, 'C');
+      // #endregion
       setError('Erro ao iniciar: ' + e.message);
       setStatus('error');
       stop();
@@ -738,25 +957,48 @@ function useTranslator() {
   }
 
   function pause() { setPaused(true); }
-  function resume() { setPaused(false); }
-  function toggleAudio() { setAudioOn(v => !v); }
-  function toggleMic() { setMicOn(v => !v); }
+  function resume() {
+    setPaused(false);
+    resumeAudioContexts();
+  }
+  function toggleAudio() {
+    setAudioOn(v => {
+      const next = !v;
+      if (!next) interruptPlayback();
+      else resumeAudioContexts();
+      return next;
+    });
+  }
+  async function toggleMic() {
+    setMicOn(v => {
+      const next = !v;
+      if (next) resumeAudioContexts();
+      return next;
+    });
+  }
 
   function sendText(text) {
+    if (searchModeRef.current) return;
     if (!text || !text.trim()) return;
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setError('Sem conexão. Aguarde reconectar ou reinicie a sessão.');
+      return;
+    }
     const t = text.trim();
-    appendInputTranscription(t);
+    beginNewTurn();
+    appendInputTranscription(t, { skipBeginTurn: true });
     wsRef.current.send(JSON.stringify({
-      realtimeInput: { text: t }
+      clientContent: {
+        turns: [{ role: 'user', parts: [{ text: t }] }],
+        turnComplete: true,
+      },
     }));
   }
 
   return {
     status, paused, audioOn, micOn, elapsed, error,
-    transA, transB, fontSize, dimmer, searching,
-    start, stop, pause, resume, toggleAudio, toggleMic, sendText,
-    setFontSize, setDimmer,
+    transA, transB,
+    start, stop, pause, resume, toggleAudio, toggleMic, sendText, setSearchMode, resumeAudioContexts,
   };
 }
 
@@ -820,6 +1062,46 @@ function OptionRow({ label, children, theme }) {
   );
 }
 
+function LangPicker({ label, value, onChange, theme, open, onToggle }) {
+  const sel = langById(value) || LANGUAGES[0];
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <label style={{
+        fontSize: 12, fontWeight: 700, color: theme.textSec,
+        textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8, display: 'block',
+      }}>{label}</label>
+      <button type="button" onClick={onToggle} style={{
+        width: '100%', padding: '16px 18px', borderRadius: theme.radius,
+        background: theme.cardBg, border: open ? `2px solid ${sel.color}` : (theme.cardBorder || `1px solid ${theme.divider}`),
+        boxShadow: theme.cardShadow, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12,
+        fontFamily: theme.font, outline: 'none', textAlign: 'left',
+      }}>
+        <span style={{ fontSize: 28, lineHeight: 1 }}>{sel.flag}</span>
+        <span style={{ flex: 1, fontSize: 18, fontWeight: 600, color: theme.text }}>{sel.label}</span>
+        <span style={{ fontSize: 14, color: theme.textSec, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>▼</span>
+      </button>
+      {open && (
+        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6, animation: 'slideUp 0.2s ease' }}>
+          {LANGUAGES.map(l => (
+            <button key={l.id} type="button" onClick={() => onChange(l.id)} style={{
+              width: '100%', padding: '14px 16px', borderRadius: theme.radius,
+              background: value === l.id ? theme.selBg(l.color) : theme.cardBg,
+              border: value === l.id ? theme.selBorder(l.color) : `1px solid ${theme.divider}`,
+              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12,
+              fontFamily: theme.font, outline: 'none', textAlign: 'left',
+            }}>
+              <span style={{ fontSize: 24 }}>{l.flag}</span>
+              <span style={{ fontSize: 16, fontWeight: value === l.id ? 600 : 400, color: value === l.id ? l.color : theme.text }}>
+                {l.label}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MicIcon({ size = 16, color = 'currentColor' }) {
   return (
     <svg width={size} height={size} viewBox="0 0 16 20" fill="none">
@@ -844,9 +1126,16 @@ function MicMutedIcon({ size = 16, color = 'currentColor' }) {
 // ==========================================
 // TRANSLATION VIEW (legenda grande estilo)
 // ==========================================
-function TranslationView({ lang, translations, theme, padTop, padBot, listening, fontSize, searching }) {
-  const latest = translations.length > 0 ? translations[translations.length - 1] : null;
-  const history = translations.slice(0, -1);
+function TranslationView({ lang, translations, theme, padTop, padBot, listening }) {
+  const lastInIdx = translations.map((t, i) => (!t.isOutput ? i : -1)).filter(i => i >= 0).pop();
+  const lastOutIdx = translations.map((t, i) => (t.isOutput ? i : -1)).filter(i => i >= 0).pop();
+  let heroIdx = -1;
+  if (lastInIdx !== undefined && lastOutIdx !== undefined) {
+    heroIdx = lastOutIdx >= lastInIdx ? lastOutIdx : lastInIdx;
+  } else if (lastOutIdx !== undefined) heroIdx = lastOutIdx;
+  else if (lastInIdx !== undefined) heroIdx = lastInIdx;
+  const latest = heroIdx >= 0 ? translations[heroIdx] : null;
+  const history = translations.filter((_, i) => i !== heroIdx).slice(-3);
 
   return (
     <div style={{
@@ -863,11 +1152,6 @@ function TranslationView({ lang, translations, theme, padTop, padBot, listening,
           textTransform: 'uppercase', letterSpacing: 0.8,
         }}>{lang.label}</span>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5 }}>
-          {searching && <span style={{
-            fontSize: 9, fontWeight: 700, color: '#fff', background: '#FF9500',
-            padding: '1px 6px', borderRadius: 8, animation: 'pulse 1.5s infinite',
-            letterSpacing: 0.3,
-          }}>Pesquisando...</span>}
           <div style={{
             width: 6, height: 6, borderRadius: '50%',
             background: listening ? theme.success : '#C0C0C0',
@@ -888,17 +1172,11 @@ function TranslationView({ lang, translations, theme, padTop, padBot, listening,
           <div key={translations.length} style={{
             textAlign: 'center', animation: 'slideUp 0.3s ease',
           }}>
-            <span style={{
-              display: 'inline-block', fontSize: 9, fontWeight: 700,
-              letterSpacing: 0.6, textTransform: 'uppercase', marginBottom: 6,
-              padding: '2px 8px', borderRadius: 4,
-              background: latest.isOutput ? lang.color + '18' : theme.divider,
-              color: latest.isOutput ? lang.color : theme.textSec,
-            }}>{latest.isOutput ? 'Tradução' : 'Original'}</span>
             <p style={{
-              fontSize: fontSize || 28, fontWeight: 600, color: theme.text,
+              fontSize: 28, fontWeight: 600, color: theme.text,
               lineHeight: 1.22, margin: 0,
               textWrap: 'balance', letterSpacing: -0.3,
+              opacity: latest.isOutput ? 1 : 0.88,
             }}>{latest.text}</p>
           </div>
         ) : (
@@ -914,14 +1192,14 @@ function TranslationView({ lang, translations, theme, padTop, padBot, listening,
           borderTop: `1px solid ${theme.divider}`,
           paddingTop: 6,
         }}>
-          {history.slice(-3).map((t, i, arr) => {
+          {history.map((t, i, arr) => {
             const opacity = 0.18 + (i / Math.max(arr.length - 1, 1)) * 0.25;
             return (
               <p key={i + '-' + t.text.slice(0, 8)} style={{
                 fontSize: 12, color: theme.text, opacity,
                 margin: '1px 0', lineHeight: 1.3, textAlign: 'center',
                 whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
-              }}>{t.isOutput ? '↗ ' : ''}{t.text}</p>
+              }}>{t.text}</p>
             );
           })}
         </div>
@@ -933,82 +1211,70 @@ function TranslationView({ lang, translations, theme, padTop, padBot, listening,
 // ==========================================
 // SETUP SCREEN
 // ==========================================
-function SetupScreen({ onStart, theme, error }) {
+function SetupScreen({ onStart, theme, error, starting }) {
   const [langA, setLangA] = React.useState(() => localStorage.getItem('lang_a') || 'pt-BR');
   const [langB, setLangB] = React.useState(() => localStorage.getItem('lang_b') || 'en-US');
+  const [openPicker, setOpenPicker] = React.useState(null);
   const [audio, setAudio] = React.useState(true);
-  const [voice, setVoice] = React.useState(() => localStorage.getItem('voice') || 'Aoede');
+  const [voiceGender, setVoiceGender] = React.useState(() => {
+    const v = localStorage.getItem('voice');
+    return v === VOICE_BY_GENDER.M.id ? 'M' : 'F';
+  });
+  const [voiceBusy, setVoiceBusy] = React.useState(null);
+  const [voiceErr, setVoiceErr] = React.useState(null);
   const [restSecs, setRestSecs] = React.useState(() => parseInt(localStorage.getItem('restSecs')) || 60);
+
+  const voice = voiceGender === 'M' ? VOICE_BY_GENDER.M.id : VOICE_BY_GENDER.F.id;
 
   React.useEffect(() => { localStorage.setItem('lang_a', langA); }, [langA]);
   React.useEffect(() => { localStorage.setItem('lang_b', langB); }, [langB]);
   React.useEffect(() => { localStorage.setItem('voice', voice); }, [voice]);
   React.useEffect(() => { localStorage.setItem('restSecs', restSecs); }, [restSecs]);
 
-  const swap = () => { const t = langA; setLangA(langB); setLangB(t); };
-
   const sameLang = langA === langB;
 
+  async function pickVoice(gender) {
+    setVoiceGender(gender);
+    setVoiceErr(null);
+    setVoiceBusy(gender);
+    try {
+      await playVoiceSample(VOICE_BY_GENDER[gender].id, langA);
+    } catch (e) {
+      setVoiceErr(e.message);
+    }
+    setVoiceBusy(null);
+  }
+
   return (
+    
     <div style={{
       flex: 1, display: 'flex', flexDirection: 'column',
-      padding: '24px 20px 24px', background: theme.bg,
+      padding: '20px 20px 24px', background: theme.bg,
       fontFamily: theme.font, overflow: 'auto',
     }}>
-      <div style={{ textAlign: 'center', marginBottom: 16, paddingTop: 8 }}>
-        <img src="logo.png" alt="Will Translator" style={{
-          width: 150, height: 'auto', borderRadius: 8,
-        }} />
+      <div style={{ textAlign: 'center', marginBottom: 20, paddingTop: 4 }}>
+        <img src="logo.png" alt="Will Translator" style={{ width: 130, height: 'auto' }} />
       </div>
 
-      <label style={{
-        fontSize: 12, fontWeight: 700, color: theme.textSec,
-        textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8,
-        display: 'block',
-      }}>Eu falo</label>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
-        {LANGUAGES.map(l => (
-          <LangCard key={l.id} lang={l} selected={langA === l.id}
-                    onSelect={() => setLangA(l.id)} theme={theme} />
-        ))}
-      </div>
+      <LangPicker label="Eu falo" value={langA} theme={theme}
+        open={openPicker === 'a'}
+        onToggle={() => setOpenPicker(openPicker === 'a' ? null : 'a')}
+        onChange={(id) => { setLangA(id); setOpenPicker(null); }} />
 
-      <div style={{ display: 'flex', justifyContent: 'center', margin: '2px 0 6px' }}>
-        <button onClick={swap} style={{
-          width: 40, height: 40, borderRadius: '50%',
-          border: `1px solid ${theme.divider}`, background: theme.cardBg,
-          cursor: 'pointer', display: 'flex', alignItems: 'center',
-          justifyContent: 'center', color: theme.primary,
-          boxShadow: theme.cardShadow, outline: 'none',
-        }}>
-          <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-            <path d="M9 2v14M9 2l-3 3M9 2l3 3M9 16l-3-3M9 16l3-3"
-                  stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-        </button>
-      </div>
-
-      <label style={{
-        fontSize: 12, fontWeight: 700, color: theme.textSec,
-        textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8,
-        display: 'block',
-      }}>Outra pessoa fala</label>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 20 }}>
-        {LANGUAGES.map(l => (
-          <LangCard key={l.id} lang={l} selected={langB === l.id}
-                    onSelect={() => setLangB(l.id)} theme={theme} />
-        ))}
-      </div>
+      <LangPicker label="Outra pessoa fala" value={langB} theme={theme}
+        open={openPicker === 'b'}
+        onToggle={() => setOpenPicker(openPicker === 'b' ? null : 'b')}
+        onChange={(id) => { setLangB(id); setOpenPicker(null); }} />
 
       <OptionRow label="Traduzir em áudio" theme={theme}>
         <IOSToggle value={audio} onChange={setAudio} theme={theme} />
       </OptionRow>
 
       <OptionRow label="Descanso (seg)" theme={theme}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {[30, 45, 60, 90, 120].map(s => (
-            <button key={s} onClick={() => setRestSecs(s)} style={{
-              padding: '5px 10px', borderRadius: 8,
+            <button key={s} type="button" onClick={() => setRestSecs(s)} style={{
+              padding: '6px 11px', borderRadius: 8,
               background: restSecs === s ? theme.primary : theme.cardBg,
               color: restSecs === s ? '#fff' : theme.text,
               border: restSecs === s ? 'none' : `1px solid ${theme.divider}`,
@@ -1019,71 +1285,80 @@ function SetupScreen({ onStart, theme, error }) {
         </div>
       </OptionRow>
 
-      {audio && (<>
-        <label style={{
-          fontSize: 12, fontWeight: 700, color: theme.textSec,
-          textTransform: 'uppercase', letterSpacing: 0.8, marginTop: 16, marginBottom: 8,
-          display: 'block',
-        }}>Voz da tradução</label>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 6 }}>
-          {VOICES.map(v => (
-            <button key={v.id} onClick={() => setVoice(v.id)} style={{
-              padding: '9px 10px', borderRadius: theme.radius,
-              background: voice === v.id ? theme.primary + '12' : theme.cardBg,
-              border: voice === v.id ? `2px solid ${theme.primary}` : (theme.cardBorder || `1px solid ${theme.divider}`),
-              boxShadow: voice === v.id ? 'none' : theme.cardShadow,
-              cursor: 'pointer', textAlign: 'left', outline: 'none',
-              display: 'flex', alignItems: 'center', gap: 7, fontFamily: theme.font,
-            }}>
-              <span style={{
-                fontSize: 13, fontWeight: 700,
-                color: v.gender === 'F' ? '#E91E8C' : '#2563EB',
-              }}>{v.gender === 'F' ? '♀' : '♂'}</span>
-              <div style={{ minWidth: 0 }}>
-                <div style={{
-                  fontSize: 13, fontWeight: voice === v.id ? 600 : 400,
-                  color: voice === v.id ? theme.primary : theme.text,
-                }}>{v.id}</div>
-                <div style={{ fontSize: 10, color: theme.textSec }}>{v.desc}</div>
-              </div>
-            </button>
-          ))}
-        </div>
-      </>)}
+      {audio && (
+        <>
+          <label style={{
+            fontSize: 12, fontWeight: 700, color: theme.textSec,
+            textTransform: 'uppercase', letterSpacing: 0.8, marginTop: 14, marginBottom: 8, display: 'block',
+          }}>Voz da tradução</label>
+          <p style={{ fontSize: 12, color: theme.textSec, margin: '0 0 10px' }}>
+            Toque para ouvir e escolher
+          </p>
+          {['F', 'M'].map(g => {
+            const info = VOICE_BY_GENDER[g];
+            const selected = voiceGender === g;
+            const busy = voiceBusy === g;
+            return (
+              <button key={g} type="button" onClick={() => pickVoice(g)} disabled={!!voiceBusy} style={{
+                width: '100%', padding: '16px 18px', marginBottom: 8, borderRadius: theme.radius,
+                background: selected ? theme.primary + '14' : theme.cardBg,
+                border: selected ? `2px solid ${theme.primary}` : (theme.cardBorder || `1px solid ${theme.divider}`),
+                cursor: voiceBusy ? 'wait' : 'pointer', display: 'flex', alignItems: 'center', gap: 12,
+                fontFamily: theme.font, outline: 'none', textAlign: 'left', opacity: voiceBusy && !busy ? 0.5 : 1,
+              }}>
+                <span style={{
+                  width: 40, height: 40, borderRadius: '50%', flexShrink: 0,
+                  background: g === 'F' ? '#E91E8C18' : '#2563EB18',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 20,
+                }}>{g === 'F' ? '♀' : '♂'}</span>
+                <span style={{ flex: 1 }}>
+                  <span style={{ display: 'block', fontSize: 17, fontWeight: 600, color: theme.text }}>{info.label}</span>
+                  <span style={{ display: 'block', fontSize: 12, color: theme.textSec, marginTop: 2 }}>
+                    {busy ? 'Ouvindo amostra…' : 'Toque para ouvir'}
+                  </span>
+                </span>
+                <span style={{ fontSize: 22 }}>{busy ? '…' : '🔊'}</span>
+              </button>
+            );
+          })}
+          {voiceErr && (
+            <p style={{ fontSize: 12, color: theme.danger, margin: '4px 0 0' }}>{voiceErr}</p>
+          )}
+        </>
+      )}
 
       {sameLang && (
         <div style={{
-          marginTop: 14, padding: '10px 14px',
-          background: '#FFF3CD', color: '#856404',
+          marginTop: 12, padding: '10px 14px', background: '#FFF3CD', color: '#856404',
           borderRadius: theme.radius, fontSize: 13,
-        }}>Os dois idiomas precisam ser diferentes pra traduzir.</div>
+        }}>Os dois idiomas precisam ser diferentes.</div>
       )}
 
       {error && (
         <div style={{
-          marginTop: 14, padding: '10px 14px',
-          background: '#FFE0E0', color: theme.danger,
+          marginTop: 12, padding: '10px 14px', background: '#FFE0E0', color: theme.danger,
           borderRadius: theme.radius, fontSize: 13,
         }}>{error}</div>
       )}
 
-      <div style={{ flex: 1, minHeight: 16 }} />
-
+      
       <button
-        onClick={() => !sameLang && onStart({ langA, langB, audio, voice, restSecs })}
-        disabled={sameLang}
+        type="button"
+        onClick={() => !sameLang && !starting && onStart({ langA, langB, audio, voice, restSecs })}
+        disabled={sameLang || starting}
         style={{
-          width: '100%', padding: '17px', borderRadius: theme.radius,
-          background: sameLang ? theme.textTer : theme.primary,
-          color: '#FFF', border: 'none',
-          fontSize: 17, fontWeight: 600,
-          cursor: sameLang ? 'not-allowed' : 'pointer',
-          fontFamily: theme.font,
-          boxShadow: sameLang ? 'none' : `0 4px 14px ${theme.primary}40`,
-        }}>Iniciar Sessão</button>
+          width: '100%', padding: '17px', borderRadius: theme.radius, marginTop: 20,
+          background: (sameLang || starting) ? theme.textTer : theme.primary,
+          color: '#FFF', border: 'none', fontSize: 17, fontWeight: 600,
+          cursor: (sameLang || starting) ? 'not-allowed' : 'pointer', fontFamily: theme.font,
+          boxShadow: (sameLang || starting) ? 'none' : `0 4px 14px ${theme.primary}40`,
+        }}>{starting ? 'Conectando...' : 'Iniciar Sessão'}</button>
     </div>
   );
 }
+
+
 
 // ==========================================
 // ACTIVE SCREEN
@@ -1095,137 +1370,165 @@ function fmtTime(secs) {
 }
 
 function ActiveScreen({ config, theme, translator, onEnd }) {
+  const [restLeft, setRestLeft] = React.useState(null);
+  const [searchMode, setSearchMode] = React.useState(false);
+  const [searchLang, setSearchLang] = React.useState(config.langA);
+  const [searchLoading, setSearchLoading] = React.useState(false);
+  const [searchAnswer, setSearchAnswer] = React.useState(null);
+  const [searchHeard, setSearchHeard] = React.useState('');
+  const [typedText, setTypedText] = React.useState('');
   const [layout, setLayout] = React.useState(() => localStorage.getItem('layout') || 'vertical');
   const [showLayoutMenu, setShowLayoutMenu] = React.useState(false);
-  const [showKb, setShowKb] = React.useState(false);
-  const [typing, setTyping] = React.useState('');
-  const [restLeft, setRestLeft] = React.useState(null);
-  const restIntervalRef = React.useRef(null);
-  const restTriggeredRef = React.useRef(false);
+
+  const runSearchRef = React.useRef(null);
 
   React.useEffect(() => { localStorage.setItem('layout', layout); }, [layout]);
 
-  const REST_TRIGGER = /^\s*hey\s+will\s+(descanso|descansa|rest|break|riposo|pausa)\b/i;
-
-  React.useEffect(() => {
-    const all = [...translator.transA, ...translator.transB];
-    if (all.length === 0) return;
-    const last = all[all.length - 1];
-    if (!last || last.isOutput) return;
-    if (REST_TRIGGER.test(last.text) && !restTriggeredRef.current && restLeft === null) {
-      restTriggeredRef.current = true;
-      setRestLeft(config.restSecs || 60);
-    }
-  }, [translator.transA, translator.transB]);
-
   React.useEffect(() => {
     if (restLeft === null) return;
-    if (restLeft <= 0) {
-      clearInterval(restIntervalRef.current);
-      restIntervalRef.current = null;
-      if (navigator.vibrate) navigator.vibrate([300, 100, 300, 100, 300]);
-      const actx = new (window.AudioContext || window.webkitAudioContext)();
-      [800, 1000, 1200].forEach((freq, i) => {
-        const osc = actx.createOscillator();
-        const gain = actx.createGain();
-        osc.frequency.value = freq;
-        osc.type = 'sine';
-        gain.gain.value = 0.3;
-        osc.connect(gain).connect(actx.destination);
-        osc.start(actx.currentTime + i * 0.2);
-        osc.stop(actx.currentTime + i * 0.2 + 0.15);
-      });
-      setTimeout(() => { setRestLeft(null); restTriggeredRef.current = false; }, 3000);
-      return;
+    if (restLeft === 0) {
+      if (navigator.vibrate) navigator.vibrate([300, 100, 300]);
+      const t = setTimeout(() => setRestLeft(null), 2500);
+      return () => clearTimeout(t);
     }
-    restIntervalRef.current = setInterval(() => {
-      setRestLeft(prev => prev !== null && prev > 0 ? prev - 1 : prev);
-    }, 1000);
-    return () => clearInterval(restIntervalRef.current);
+    const id = setInterval(() => setRestLeft(s => (s <= 1 ? 0 : s - 1)), 1000);
+    return () => clearInterval(id);
   }, [restLeft]);
 
+  const runSearch = React.useCallback(async (rawText) => {
+    const { query, langId } = parseSearchRequest(rawText, config, searchLang);
+    if (!query || searchLoading) return;
+    setSearchLang(langId);
+    setSearchLoading(true);
+    setSearchAnswer(null);
+    setSearchHeard(query);
+    try {
+      const ans = await searchInternet(query, langId);
+      setSearchAnswer(ans);
+      DEBUG_LOG('index.html:runSearch', 'Search ok', { len: ans.length, langId }, 'F');
+    } catch (e) {
+      setSearchAnswer('Erro: ' + e.message);
+      DEBUG_LOG('index.html:runSearch', 'Search fail', { error: e.message }, 'F');
+    }
+    setSearchLoading(false);
+  }, [config, searchLang, searchLoading]);
+
+  runSearchRef.current = runSearch;
+
+  const translatorRef = React.useRef(translator);
+  translatorRef.current = translator;
+
+  React.useEffect(() => {
+    translatorRef.current.setSearchMode(searchMode, (utterance) => {
+      setSearchHeard(utterance);
+      runSearchRef.current?.(utterance);
+    });
+    return () => translatorRef.current.setSearchMode(false, null);
+  }, [searchMode]);
+
+  function startRest() {
+    DEBUG_LOG('index.html:startRest', 'Rest timer started', { secs: config.restSecs || 60 }, 'E');
+    setRestLeft(config.restSecs || 60);
+  }
+
   function cancelRest() {
-    clearInterval(restIntervalRef.current);
-    restIntervalRef.current = null;
     setRestLeft(null);
-    restTriggeredRef.current = false;
+  }
+
+  function toggleSearchMode() {
+    setSearchMode(on => {
+      const next = !on;
+      if (!next) {
+        setSearchAnswer(null);
+        setSearchHeard('');
+        setSearchLoading(false);
+      }
+      return next;
+    });
+  }
+
+  function submitInput() {
+    const t = typedText.trim();
+    if (!t) return;
+    translator.resumeAudioContexts?.();
+    if (searchMode) runSearch(t);
+    else translator.sendText(t);
+    setTypedText('');
   }
 
   const langA = langById(config.langA);
   const langB = langById(config.langB);
+  const listening = translator.status === 'active' && !translator.paused && translator.micOn;
   const isVert = layout !== 'horizontal';
   const isRotated = layout === 'vertical';
-
-  const listening = translator.status === 'active' && !translator.paused && translator.micOn;
+  const padB = isRotated
+    ? { top: 8, bot: 22 }
+    : isVert
+      ? { top: 10, bot: 10 }
+      : { top: 12, bot: 12 };
+  const padA = isRotated
+    ? { top: 22, bot: 8 }
+    : isVert
+      ? { top: 10, bot: 10 }
+      : { top: 12, bot: 12 };
 
   const ctrlBtn = (child, opts = {}) => (
-    <button onClick={opts.onClick} title={opts.title} style={{
-      width: 38, height: 38, borderRadius: '50%',
-      border: `1px solid ${opts.danger ? theme.danger + '30' : opts.active ? theme.primary + '40' : theme.divider}`,
-      background: opts.danger ? theme.danger + '10' : opts.active ? theme.primary + '12' : theme.cardBg,
+    <button type="button" onClick={opts.onClick} title={opts.title} style={{
+      width: 40, height: 40, borderRadius: '50%',
+      border: `1px solid ${opts.danger ? theme.danger + '40' : opts.active ? theme.primary + '40' : theme.divider}`,
+      background: opts.danger ? theme.danger + '12' : opts.active ? theme.primary + '12' : theme.cardBg,
       cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
       color: opts.danger ? theme.danger : opts.active ? theme.primary : theme.textSec,
-      outline: 'none', fontSize: 15, flexShrink: 0,
+      outline: 'none', fontSize: 15, flexShrink: 0, fontFamily: theme.font,
     }}>{child}</button>
   );
 
-  const sendKb = () => {
-    if (typing.trim()) {
-      translator.sendText(typing.trim());
-      setTyping('');
-    }
-  };
+  const actionBtn = (label, onClick, color, disabled) => (
+    <button onClick={onClick} disabled={disabled} style={{
+      flex: 1, padding: '14px 8px', borderRadius: theme.radius,
+      background: disabled ? theme.textTer : color,
+      color: '#FFF', border: 'none', fontSize: 15, fontWeight: 600,
+      cursor: disabled ? 'not-allowed' : 'pointer', fontFamily: theme.font,
+    }}>{label}</button>
+  );
 
   return (
+    
     <div style={{
       height: '100%', display: 'flex', flexDirection: 'column',
       position: 'relative', fontFamily: theme.font, background: theme.bg,
     }}>
-      {translator.dimmer && (
-        <div onClick={() => translator.setDimmer(false)} style={{
-          position: 'absolute', inset: 0, zIndex: 80,
-          background: 'rgba(0,0,0,0.93)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          cursor: 'pointer',
+      {(translator.error || translator.status === 'reconnecting') && (
+        <div style={{
+          flexShrink: 0, padding: '10px 14px', background: theme.danger + '18',
+          color: theme.danger, fontSize: 13, fontWeight: 600, textAlign: 'center',
+          borderBottom: `1px solid ${theme.danger}40`,
         }}>
-          <p style={{ color: 'rgba(255,255,255,0.12)', fontSize: 13, fontFamily: theme.font }}>
-            Toque para ativar a tela
-          </p>
+          {translator.status === 'reconnecting' ? 'Reconectando…' : translator.error}
         </div>
       )}
-
       {restLeft !== null && (
         <div style={{
-          position: 'absolute', top: '50%', left: '50%',
-          transform: 'translate(-50%, -50%)', zIndex: 70,
-          pointerEvents: 'none',
+          position: 'absolute', top: 10, right: 12, zIndex: 60,
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '8px 12px', borderRadius: 24,
+          background: restLeft <= 0 ? theme.success : 'rgba(0,0,0,0.78)',
+          boxShadow: '0 2px 12px rgba(0,0,0,0.2)',
         }}>
-          <div style={{
-            background: restLeft <= 0 ? theme.success + 'E6' : 'rgba(0,0,0,0.75)',
-            borderRadius: 20, padding: '20px 32px',
-            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
-            backdropFilter: 'blur(8px)', pointerEvents: 'auto',
-            boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
-            animation: restLeft <= 5 && restLeft > 0 ? 'pulse 0.5s infinite' : 'none',
-          }}>
-            <span style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.7)',
-              textTransform: 'uppercase', letterSpacing: 1 }}>
-              {restLeft <= 0 ? 'Descanso finalizado!' : 'Descanso'}
-            </span>
-            <span style={{
-              fontSize: 52, fontWeight: 200, color: '#fff',
-              fontVariantNumeric: 'tabular-nums', lineHeight: 1,
-              fontFamily: theme.font,
-            }}>
-              {restLeft <= 0 ? '00:00' : fmtTime(restLeft)}
-            </span>
-            <button onClick={cancelRest} style={{
-              marginTop: 4, padding: '6px 20px', borderRadius: 10,
-              background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.25)',
-              color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer',
-              fontFamily: theme.font,
-            }}>{restLeft <= 0 ? 'Fechar' : 'Cancelar'}</button>
-          </div>
+          <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.75)', textTransform: 'uppercase', letterSpacing: 0.6 }}>
+            {restLeft <= 0 ? 'Pronto' : 'Descanso'}
+          </span>
+          <span style={{
+            fontSize: 20, fontWeight: 600, color: '#fff',
+            fontVariantNumeric: 'tabular-nums', minWidth: 52, textAlign: 'center',
+          }}>{restLeft <= 0 ? '00:00' : fmtTime(restLeft)}</span>
+          {restLeft > 0 && (
+            <button type="button" onClick={cancelRest} aria-label="Parar cronômetro" style={{
+              width: 28, height: 28, borderRadius: '50%', border: 'none',
+              background: 'rgba(255,255,255,0.2)', color: '#fff', fontSize: 16,
+              cursor: 'pointer', lineHeight: 1, fontFamily: theme.font,
+            }}>×</button>
+          )}
         </div>
       )}
 
@@ -1251,40 +1554,37 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
           borderRight: !isVert ? `1px solid ${theme.divider}` : 'none',
         }}>
           <TranslationView lang={langB} translations={translator.transB} theme={theme}
-            padTop={isRotated ? 8 : 22} padBot={isRotated ? 22 : 8} listening={listening}
-            fontSize={translator.fontSize} searching={translator.searching} />
+            padTop={padB.top} padBot={padB.bot} listening={listening} />
         </div>
-
         <div style={{
           flex: 1, display: 'flex', flexDirection: 'column',
           overflow: 'hidden', minHeight: 0, minWidth: 0,
         }}>
           <TranslationView lang={langA} translations={translator.transA} theme={theme}
-            padTop={isVert ? 8 : 22} listening={listening}
-            fontSize={translator.fontSize} searching={translator.searching} />
+            padTop={padA.top} padBot={padA.bot} listening={listening} />
         </div>
       </div>
 
       {showLayoutMenu && (
         <div style={{
-          position: 'absolute', bottom: 62, left: '50%',
+          position: 'absolute', bottom: 118, left: '50%',
           transform: 'translateX(-50%)',
           background: theme.cardBg, borderRadius: theme.radius,
           boxShadow: '0 6px 24px rgba(0,0,0,0.18)',
-          border: theme.cardBorder || `1px solid ${theme.divider}`,
-          padding: 6, zIndex: 50, width: 200,
+          border: `1px solid ${theme.divider}`,
+          padding: 6, zIndex: 55, width: 210,
           display: 'flex', flexDirection: 'column', gap: 2,
         }}>
           <div style={{
             fontSize: 10, fontWeight: 700, color: theme.textSec,
             padding: '6px 10px 4px', letterSpacing: 0.6, textTransform: 'uppercase',
-          }}>Layout</div>
+          }}>Visualização</div>
           {[
-            { v: 'vertical', l: 'Frente a frente' },
-            { v: 'same', l: 'Mesmo lado' },
-            { v: 'horizontal', l: 'Lado a lado' },
+            { v: 'vertical', l: 'Frente a frente', hint: 'Um de cabeça para baixo' },
+            { v: 'same', l: 'Mesmo lado', hint: 'Os dois em cima e embaixo' },
+            { v: 'horizontal', l: 'Lado a lado', hint: 'Dividido na horizontal' },
           ].map(opt => (
-            <button key={opt.v}
+            <button key={opt.v} type="button"
               onClick={() => { setLayout(opt.v); setShowLayoutMenu(false); }}
               style={{
                 padding: '10px 12px', textAlign: 'left',
@@ -1293,121 +1593,116 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
                 border: 'none', borderRadius: 8, cursor: 'pointer',
                 fontSize: 14, fontFamily: theme.font,
                 fontWeight: layout === opt.v ? 600 : 400,
-                outline: 'none',
-              }}>{opt.l}</button>
+              }}>
+              <span style={{ display: 'block' }}>{opt.l}</span>
+              <span style={{ fontSize: 11, color: theme.textSec, fontWeight: 400 }}>{opt.hint}</span>
+            </button>
           ))}
         </div>
       )}
 
-      <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        gap: 8, padding: '8px 16px 4px',
-        background: theme.bg, borderTop: `1px solid ${theme.divider}`,
-        flexShrink: 0,
-      }}>
-        <span style={{
-          fontSize: 13, fontWeight: 600, color: theme.textSec,
-          fontVariantNumeric: 'tabular-nums', marginRight: 2, minWidth: 38,
-        }}>{fmtTime(translator.elapsed)}</span>
-
-        {ctrlBtn(
-          translator.micOn ? <MicIcon size={14} /> : <MicMutedIcon size={14} />,
-          { onClick: translator.toggleMic, active: translator.micOn, title: translator.micOn ? 'Microfone ligado' : 'Microfone mudo' }
-        )}
-        {ctrlBtn(
-          <svg width="15" height="12" viewBox="0 0 15 12" fill="none">
-            <rect x="0.5" y="0.5" width="14" height="11" rx="2" stroke="currentColor" strokeWidth="1"/>
-            <line x1="3" y1="4" x2="12" y2="4" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
-            <line x1="3" y1="7" x2="9" y2="7" stroke="currentColor" strokeWidth="1" strokeLinecap="round"/>
-          </svg>,
-          { onClick: () => setShowKb(!showKb), active: showKb, title: 'Teclado' }
-        )}
-        {ctrlBtn(
-          <svg width="16" height="14" viewBox="0 0 16 14" fill="none">
-            <path d="M1 3.5V2a1 1 0 011-1h3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-            <path d="M1 10.5V12a1 1 0 001 1h3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-            <path d="M15 3.5V2a1 1 0 00-1-1h-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-            <path d="M15 10.5V12a1 1 0 01-1 1h-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-            {translator.audioOn ? (
-              <>
-                <path d="M5 5.5L7.5 4v6L5 8.5H3.5v-3H5z" fill="currentColor"/>
-                <path d="M9.5 5a2.5 2.5 0 010 4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" fill="none"/>
-                <path d="M11 3.5a4.5 4.5 0 010 7" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" fill="none"/>
-              </>
-            ) : (
-              <>
-                <path d="M5 5.5L7.5 4v6L5 8.5H3.5v-3H5z" fill="currentColor"/>
-                <line x1="10" y1="5" x2="13" y2="9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-                <line x1="13" y1="5" x2="10" y2="9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
-              </>
-            )}
-          </svg>,
-          { onClick: translator.toggleAudio, active: translator.audioOn, title: translator.audioOn ? 'Áudio ligado' : 'Áudio mudo' }
-        )}
-        {ctrlBtn(
-          <span style={{ fontSize: 11, fontWeight: 700, lineHeight: 1 }}>A-</span>,
-          { onClick: () => translator.setFontSize(s => Math.max(16, s - 4)), title: 'Diminuir fonte' }
-        )}
-        {ctrlBtn(
-          <span style={{ fontSize: 11, fontWeight: 700, lineHeight: 1 }}>A+</span>,
-          { onClick: () => translator.setFontSize(s => Math.min(48, s + 4)), title: 'Aumentar fonte' }
-        )}
-        {ctrlBtn(
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeWidth="1.2" fill={translator.dimmer ? 'currentColor' : 'none'}/>
-            <path d="M7 4v3l2 1.5" stroke={translator.dimmer ? '#FFF' : 'currentColor'} strokeWidth="1.2" strokeLinecap="round"/>
-          </svg>,
-          { onClick: () => translator.setDimmer(d => !d), active: translator.dimmer, title: 'Modo escuro' }
-        )}
-        {ctrlBtn(
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-            <rect x="1" y="1" width="12" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
-            <rect x="1" y="8" width="12" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
-          </svg>,
-          { onClick: () => setShowLayoutMenu(!showLayoutMenu), active: showLayoutMenu, title: 'Layout' }
-        )}
-        {ctrlBtn(
-          <svg width="12" height="14" viewBox="0 0 12 14" fill="none">
-            <rect x="1" y="1" width="4" height="12" rx="1" fill="currentColor"/>
-            <rect x="7" y="1" width="4" height="12" rx="1" fill="currentColor"/>
-          </svg>,
-          { onClick: translator.pause, title: 'Pausar' }
-        )}
-        {ctrlBtn(
-          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-            <rect width="12" height="12" rx="2" fill="currentColor"/>
-          </svg>,
-          { onClick: onEnd, danger: true, title: 'Encerrar' }
-        )}
-      </div>
-
-      {showKb && (
+      {searchMode && (
         <div style={{
-          padding: '8px 16px 6px', borderTop: `1px solid ${theme.divider}`,
-          background: theme.bg, flexShrink: 0,
+          flexShrink: 0, padding: '10px 14px', borderTop: `1px solid ${theme.divider}`,
+          background: '#FFF8F0',
         }}>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <input type="text" value={typing} onChange={e => setTyping(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') sendKb(); }}
-              placeholder="Digite para traduzir..."
-              style={{
-                flex: 1, padding: '11px 14px', borderRadius: theme.radius,
-                border: `1px solid ${theme.divider}`, background: theme.cardBg,
-                color: theme.text, fontSize: 15, outline: 'none', fontFamily: theme.font,
-              }} />
-            <button onClick={sendKb} style={{
-              padding: '11px 14px', borderRadius: theme.radius,
-              background: theme.primary, color: '#FFF', border: 'none',
-              fontSize: 14, fontWeight: 600, cursor: 'pointer', fontFamily: theme.font,
-            }}>Enviar</button>
+          <p style={{ fontSize: 13, fontWeight: 600, color: '#C2410C', margin: '0 0 6px' }}>
+            🔍 Modo pesquisa — fale ou digite abaixo
+          </p>
+          <p style={{ fontSize: 11, color: theme.textSec, margin: '0 0 8px', lineHeight: 1.35 }}>
+            Diga o idioma da resposta (ex.: &quot;responde em inglês&quot;) ou toque:
+          </p>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: searchAnswer || searchHeard ? 8 : 0 }}>
+            {LANGUAGES.map(l => (
+              <button key={l.id} type="button" onClick={() => setSearchLang(l.id)} style={{
+                padding: '5px 10px', borderRadius: 8, fontSize: 12,
+                background: searchLang === l.id ? '#FF9500' : theme.cardBg,
+                color: searchLang === l.id ? '#fff' : theme.text,
+                border: searchLang === l.id ? 'none' : `1px solid ${theme.divider}`,
+                cursor: 'pointer', fontFamily: theme.font,
+              }}>{l.flag} {l.short}</button>
+            ))}
           </div>
+          {searchHeard && !searchAnswer && (
+            <p style={{ fontSize: 12, color: theme.textSec, margin: '6px 0 0', fontStyle: 'italic' }}>
+              {searchLoading ? '🔎 Buscando: ' : 'Ouviu: '}{searchHeard}
+            </p>
+          )}
+          {searchAnswer && (
+            <div style={{
+              marginTop: 8, padding: 10, borderRadius: 10,
+              background: theme.cardBg, maxHeight: '18vh', overflow: 'auto',
+            }}>
+              <p style={{ fontSize: 14, color: theme.text, lineHeight: 1.45, margin: 0 }}>{searchAnswer}</p>
+              <button type="button" onClick={() => { setSearchAnswer(null); setSearchHeard(''); }} style={{
+                marginTop: 8, padding: '6px 12px', borderRadius: 8, border: 'none',
+                background: theme.primary, color: '#fff', fontSize: 12, fontWeight: 600,
+                cursor: 'pointer', fontFamily: theme.font,
+              }}>Nova pergunta</button>
+            </div>
+          )}
         </div>
       )}
 
-      <div style={{ height: 8, flexShrink: 0 }} />
+      <div style={{
+        padding: '10px 16px 8px', borderTop: `1px solid ${theme.divider}`,
+        background: theme.bg, flexShrink: 0,
+      }}>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input
+            type="text"
+            value={typedText}
+            onChange={e => setTypedText(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') submitInput(); }}
+            placeholder={searchMode ? 'Fale no mic ou digite sua pergunta...' : 'Digite para traduzir...'}
+            style={{
+              flex: 1, padding: '12px 14px', borderRadius: theme.radius,
+              border: `1px solid ${theme.divider}`, background: theme.cardBg,
+              color: theme.text, fontSize: 16, outline: 'none', fontFamily: theme.font,
+            }}
+          />
+          <button type="button" onClick={submitInput} disabled={!typedText.trim() || searchLoading} style={{
+            padding: '12px 16px', borderRadius: theme.radius,
+            background: typedText.trim() && !searchLoading ? (searchMode ? '#FF9500' : theme.primary) : theme.textTer,
+            color: '#FFF', border: 'none', fontSize: 15, fontWeight: 600,
+            cursor: typedText.trim() && !searchLoading ? 'pointer' : 'not-allowed', fontFamily: theme.font,
+          }}>{searchMode ? (searchLoading ? '...' : 'Buscar') : 'Enviar'}</button>
+        </div>
+      </div>
+
+      <div style={{ padding: '10px 16px 6px', display: 'flex', gap: 10, flexShrink: 0, borderTop: `1px solid ${theme.divider}` }}>
+        {actionBtn(searchMode ? '✓ Tradutor' : '🔍 Pesquisar', toggleSearchMode, searchMode ? theme.textSec : '#FF9500', false)}
+        {actionBtn('⏱ Cronômetro', startRest, '#5856D6', false)}
+      </div>
+
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+        padding: '6px 16px 12px', flexShrink: 0,
+      }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: theme.textSec, fontVariantNumeric: 'tabular-nums', minWidth: 42 }}>
+          {fmtTime(translator.elapsed)}
+        </span>
+        {ctrlBtn(
+          translator.micOn ? <MicIcon size={14} /> : <MicMutedIcon size={14} />,
+          { onClick: translator.toggleMic, active: translator.micOn, title: 'Microfone' }
+        )}
+        {ctrlBtn(translator.audioOn ? '🔊' : '🔇', {
+          onClick: translator.toggleAudio, active: translator.audioOn, title: 'Áudio',
+        })}
+        {ctrlBtn(
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <rect x="1" y="1" width="12" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
+            <rect x="1" y="8" width="12" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
+          </svg>,
+          { onClick: () => setShowLayoutMenu(v => !v), active: showLayoutMenu, title: 'Visualização do chat' }
+        )}
+        {ctrlBtn('⏸', { onClick: translator.pause, title: 'Pausar' })}
+        {ctrlBtn('⏹', { onClick: onEnd, danger: true, title: 'Encerrar' })}
+      </div>
     </div>
   );
 }
+
 
 // ==========================================
 // PAUSED OVERLAY
@@ -1535,7 +1830,7 @@ function SplashScreen({ onDone }) {
     v.play().catch(() => {
       setTimeout(onDone, 800);
     });
-    const fallback = setTimeout(onDone, 7000);
+    const fallback = setTimeout(onDone, 2000);
     return () => { v.removeEventListener('ended', onEnd); clearTimeout(fallback); };
   }, []);
 
@@ -1601,7 +1896,8 @@ function TradutorApp() {
     }}>
       {splash && <SplashScreen onDone={() => setSplash(false)} />}
       {!splash && screen === 'setup' && (
-        <SetupScreen onStart={handleStart} theme={theme} error={translator.error} />
+        <SetupScreen onStart={handleStart} theme={theme} error={translator.error}
+          starting={translator.status !== 'idle'} />
       )}
       {!splash && screen === 'active' && config && (
         <ActiveScreen config={config} theme={theme} translator={translator} onEnd={handleEnd} />
