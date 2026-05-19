@@ -1096,22 +1096,29 @@ function useTranslator() {
     }));
   }
 
-  function speakResult(text) {
+  function addSearchResult(text, langId) {
     if (!text || !text.trim()) return;
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    beginNewTurn();
-    wsRef.current.send(JSON.stringify({
-      clientContent: {
-        turns: [{ role: 'user', parts: [{ text: 'FALE_DIRETO: ' + text.trim() }] }],
-        turnComplete: true,
-      },
-    }));
+    const cfg = configRef.current;
+    if (!cfg) return;
+    const a = langById(cfg.langA), b = langById(cfg.langB);
+    if (!a || !b) return;
+    const lang = langById(langId);
+    const base = lang?.base;
+    const target = base === a.base ? 'A' : 'B';
+    const entry = { text: text.trim(), isOutput: true };
+    const setter = target === 'A' ? setTransA : setTransB;
+    setter(prev => {
+      const next = [...prev, entry];
+      const capped = next.length > MAX_TRANSLATIONS ? next.slice(-MAX_TRANSLATIONS) : next;
+      transLenRef.current[target] = capped.length;
+      return capped;
+    });
   }
 
   return {
     status, paused, audioOn, micOn, elapsed, error,
     transA, transB,
-    start, stop, pause, resume, toggleAudio, toggleMic, sendText, speakResult, setSearchMode, resumeAudioContexts,
+    start, stop, pause, resume, toggleAudio, toggleMic, sendText, addSearchResult, setSearchMode, resumeAudioContexts,
   };
 }
 
@@ -1514,6 +1521,7 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
       const { query, langId } = parseSearchRequest(rawText, config, config.langA);
       if (query) {
         const ans = await searchInternet(query, langId);
+        translatorRef.current.addSearchResult?.(ans, langId);
         await speakSearchResult(ans, config.voice || 'Aoede');
       }
     } catch (e) { /* silencioso */ }
