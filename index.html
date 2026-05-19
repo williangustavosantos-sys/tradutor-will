@@ -301,15 +301,18 @@ function parseSearchRequest(text, config, defaultLangId) {
   };
 
   const rules = [
-    { re: /(?:^|[\s,.])(?:responde|responder|fala|falar|diz|diga|em)\s+(?:em\s+)?portugu[eê]s(?:\s+brasileiro)?\s*[,:.\-]?\s*/gi, base: 'pt' },
-    { re: /(?:^|[\s,.])(?:respond|answer|speak|say|in)\s+(?:in\s+)?(?:english|ingl[eê]s)\s*[,:.\-]?\s*/gi, base: 'en' },
-    { re: /(?:^|[\s,.])(?:rispondi|rispondere|parla|in)\s+(?:in\s+)?italiano\s*[,:.\-]?\s*/gi, base: 'it' },
-    { re: /(?:^|[\s,.])(?:em\s+)?portugu[eê]s\s*[,:.\-]?\s*$/gi, base: 'pt' },
-    { re: /(?:^|[\s,.])(?:in\s+)?(?:english|ingl[eê]s)\s*[,:.\-]?\s*$/gi, base: 'en' },
-    { re: /(?:^|[\s,.])(?:in\s+)?italiano\s*[,:.\-]?\s*$/gi, base: 'it' },
-    { re: /\b(responde|responder)\s+em\s+(pt|portugu[eê]s)\b/gi, base: 'pt' },
-    { re: /\b(respond|answer)\s+in\s+(en|english|ingl[eê]s)\b/gi, base: 'en' },
-    { re: /\b(rispondi|rispondere)\s+in\s+(it|italiano)\b/gi, base: 'it' },
+    { re: /\b(?:responda?|responder|fala|falar|diz|diga|me\s+diga?)\s+em\s+portugu[eê]s(?:\s+brasileiro)?\b\s*[,:.\-]?\s*/gi, base: 'pt' },
+    { re: /\b(?:responda?|responder|fala|falar|diz|diga|me\s+diga?)\s+em\s+ingl[eê]s\b\s*[,:.\-]?\s*/gi, base: 'en' },
+    { re: /\b(?:responda?|responder|fala|falar|diz|diga|me\s+diga?)\s+em\s+italiano\b\s*[,:.\-]?\s*/gi, base: 'it' },
+    { re: /\b(?:respond|answer|speak|say|tell\s+me)\s+in\s+(?:english|ingl[eê]s)\b\s*[,:.\-]?\s*/gi, base: 'en' },
+    { re: /\b(?:respond|answer|speak|say|tell\s+me)\s+in\s+(?:portuguese|portugu[eê]s)\b\s*[,:.\-]?\s*/gi, base: 'pt' },
+    { re: /\b(?:rispondi|rispondere|parla|dimmi)\s+in\s+italiano\b\s*[,:.\-]?\s*/gi, base: 'it' },
+    { re: /\bem\s+portugu[eê]s(?:\s+brasileiro)?\s*[,:.\-]?\s*$/gi, base: 'pt' },
+    { re: /\bem\s+ingl[eê]s\s*[,:.\-]?\s*$/gi, base: 'en' },
+    { re: /\bem\s+italiano\s*[,:.\-]?\s*$/gi, base: 'it' },
+    { re: /\bin\s+english\s*[,:.\-]?\s*$/gi, base: 'en' },
+    { re: /\bin\s+(?:portuguese|portugu[eê]s)\s*[,:.\-]?\s*$/gi, base: 'pt' },
+    { re: /\bin\s+italian(?:o)?\s*[,:.\-]?\s*$/gi, base: 'it' },
   ];
 
   for (const { re, base } of rules) {
