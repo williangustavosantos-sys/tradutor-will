@@ -269,11 +269,6 @@ function buildSystemPrompt(langAId, langBId) {
   return base;
 }
 
-function buildVoicePersonas(langAId, langBId) {
-  const a = langById(langAId), b = langById(langBId);
-  if (!a || !b) return '';
-  return `\n\nPERSONAS DE VOZ — OBRIGATÓRIO:\n- Quando falar em ${a.label}: use a voz "VOZ_A"\n- Quando falar em ${b.label}: use a voz "VOZ_B"`;
-}
 
 // Extrai idioma da resposta e limpa a pergunta (ex.: "... responde em inglês")
 function parseSearchRequest(text, config, defaultLangId) {
@@ -723,26 +718,16 @@ function useTranslator() {
 
   function sendSetup() {
     const cfg = configRef.current;
-    const vA = cfg.voiceA || cfg.voice || 'Aoede';
-    const vB = cfg.voiceB || cfg.voice || 'Aoede';
-    const useDual = vA !== vB;
-    const speechCfg = useDual
-      ? { multiSpeakerVoiceConfig: { speakerVoiceConfigs: [
-          { speaker: 'VOZ_A', voiceConfig: { prebuiltVoiceConfig: { voiceName: vA } } },
-          { speaker: 'VOZ_B', voiceConfig: { prebuiltVoiceConfig: { voiceName: vB } } },
-        ]}}
-      : { voiceConfig: { prebuiltVoiceConfig: { voiceName: vA } } };
-    const systemText = buildSystemPrompt(cfg.langA, cfg.langB)
-      + (useDual ? buildVoicePersonas(cfg.langA, cfg.langB) : '');
+    const voiceName = cfg.voice || 'Aoede';
     wsRef.current.send(JSON.stringify({
       setup: {
         model: GEMINI_MODEL,
         generationConfig: {
           responseModalities: ['AUDIO'],
-          speechConfig: speechCfg,
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
           temperature: 0.3,
         },
-        systemInstruction: { parts: [{ text: systemText }] },
+        systemInstruction: { parts: [{ text: buildSystemPrompt(cfg.langA, cfg.langB) }] },
         outputAudioTranscription: {},
         inputAudioTranscription: {},
         realtimeInputConfig: { automaticActivityDetection: {} },
@@ -1234,37 +1219,29 @@ function SetupScreen({ onStart, theme, error, starting }) {
   const [langB, setLangB] = React.useState(() => localStorage.getItem('lang_b') || 'en-US');
   const [openPicker, setOpenPicker] = React.useState(null);
   const [audio, setAudio] = React.useState(true);
-  const [voiceGenderA, setVoiceGenderA] = React.useState(() => {
-    const v = localStorage.getItem('voice_a') || localStorage.getItem('voice');
-    return v === VOICE_BY_GENDER.M.id ? 'M' : 'F';
-  });
-  const [voiceGenderB, setVoiceGenderB] = React.useState(() => {
-    const v = localStorage.getItem('voice_b');
+  const [voiceGender, setVoiceGender] = React.useState(() => {
+    const v = localStorage.getItem('voice');
     return v === VOICE_BY_GENDER.M.id ? 'M' : 'F';
   });
   const [voiceBusy, setVoiceBusy] = React.useState(null);
   const [voiceErr, setVoiceErr] = React.useState(null);
   const [restSecs, setRestSecs] = React.useState(() => parseInt(localStorage.getItem('restSecs')) || 60);
 
-  const voiceA = voiceGenderA === 'M' ? VOICE_BY_GENDER.M.id : VOICE_BY_GENDER.F.id;
-  const voiceB = voiceGenderB === 'M' ? VOICE_BY_GENDER.M.id : VOICE_BY_GENDER.F.id;
+  const voice = voiceGender === 'M' ? VOICE_BY_GENDER.M.id : VOICE_BY_GENDER.F.id;
 
   React.useEffect(() => { localStorage.setItem('lang_a', langA); }, [langA]);
   React.useEffect(() => { localStorage.setItem('lang_b', langB); }, [langB]);
-  React.useEffect(() => { localStorage.setItem('voice_a', voiceA); }, [voiceA]);
-  React.useEffect(() => { localStorage.setItem('voice_b', voiceB); }, [voiceB]);
+  React.useEffect(() => { localStorage.setItem('voice', voice); }, [voice]);
   React.useEffect(() => { localStorage.setItem('restSecs', restSecs); }, [restSecs]);
 
   const sameLang = langA === langB;
 
-  async function pickVoice(slot, gender) {
-    if (slot === 'A') setVoiceGenderA(gender);
-    else setVoiceGenderB(gender);
+  async function pickVoice(gender) {
+    setVoiceGender(gender);
     setVoiceErr(null);
-    setVoiceBusy(slot + gender);
+    setVoiceBusy(gender);
     try {
-      const langId = slot === 'A' ? langA : langB;
-      await playVoiceSample(VOICE_BY_GENDER[gender].id, langId);
+      await playVoiceSample(VOICE_BY_GENDER[gender].id, langA);
     } catch (e) {
       setVoiceErr(e.message);
     }
@@ -1315,51 +1292,37 @@ function SetupScreen({ onStart, theme, error, starting }) {
         <>
           <label style={{
             fontSize: 12, fontWeight: 700, color: theme.textSec,
-            textTransform: 'uppercase', letterSpacing: 0.8, marginTop: 14, marginBottom: 4, display: 'block',
+            textTransform: 'uppercase', letterSpacing: 0.8, marginTop: 14, marginBottom: 8, display: 'block',
           }}>Voz da tradução</label>
           <p style={{ fontSize: 12, color: theme.textSec, margin: '0 0 10px' }}>
-            Toque para ouvir e escolher — cada idioma tem voz independente
+            Toque para ouvir e escolher
           </p>
-          {[
-            { slot: 'A', gender: voiceGenderA, langId: langA },
-            { slot: 'B', gender: voiceGenderB, langId: langB },
-          ].map(({ slot, gender, langId }) => {
-            const lang = langById(langId);
+          {['F', 'M'].map(g => {
+            const info = VOICE_BY_GENDER[g];
+            const selected = voiceGender === g;
+            const busy = voiceBusy === g;
             return (
-              <div key={slot} style={{ marginBottom: 14 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: theme.textSec, marginBottom: 6 }}>
-                  {lang?.flag} {lang?.label}
-                </div>
-                {['F', 'M'].map(g => {
-                  const info = VOICE_BY_GENDER[g];
-                  const selected = gender === g;
-                  const busyKey = slot + g;
-                  const busy = voiceBusy === busyKey;
-                  return (
-                    <button key={g} type="button" onClick={() => pickVoice(slot, g)} disabled={!!voiceBusy} style={{
-                      width: '100%', padding: '14px 16px', marginBottom: 6, borderRadius: theme.radius,
-                      background: selected ? theme.primary + '14' : theme.cardBg,
-                      border: selected ? `2px solid ${theme.primary}` : (theme.cardBorder || `1px solid ${theme.divider}`),
-                      cursor: voiceBusy ? 'wait' : 'pointer', display: 'flex', alignItems: 'center', gap: 12,
-                      fontFamily: theme.font, outline: 'none', textAlign: 'left', opacity: voiceBusy && !busy ? 0.5 : 1,
-                    }}>
-                      <span style={{
-                        width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
-                        background: g === 'F' ? '#E91E8C18' : '#2563EB18',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        fontSize: 18,
-                      }}>{g === 'F' ? '♀' : '♂'}</span>
-                      <span style={{ flex: 1 }}>
-                        <span style={{ display: 'block', fontSize: 15, fontWeight: 600, color: theme.text }}>{info.label}</span>
-                        <span style={{ display: 'block', fontSize: 11, color: theme.textSec, marginTop: 1 }}>
-                          {busy ? 'Ouvindo amostra…' : 'Toque para ouvir'}
-                        </span>
-                      </span>
-                      <span style={{ fontSize: 20 }}>{busy ? '…' : '🔊'}</span>
-                    </button>
-                  );
-                })}
-              </div>
+              <button key={g} type="button" onClick={() => pickVoice(g)} disabled={!!voiceBusy} style={{
+                width: '100%', padding: '16px 18px', marginBottom: 8, borderRadius: theme.radius,
+                background: selected ? theme.primary + '14' : theme.cardBg,
+                border: selected ? `2px solid ${theme.primary}` : (theme.cardBorder || `1px solid ${theme.divider}`),
+                cursor: voiceBusy ? 'wait' : 'pointer', display: 'flex', alignItems: 'center', gap: 12,
+                fontFamily: theme.font, outline: 'none', textAlign: 'left', opacity: voiceBusy && !busy ? 0.5 : 1,
+              }}>
+                <span style={{
+                  width: 40, height: 40, borderRadius: '50%', flexShrink: 0,
+                  background: g === 'F' ? '#E91E8C18' : '#2563EB18',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 20,
+                }}>{g === 'F' ? '♀' : '♂'}</span>
+                <span style={{ flex: 1 }}>
+                  <span style={{ display: 'block', fontSize: 17, fontWeight: 600, color: theme.text }}>{info.label}</span>
+                  <span style={{ display: 'block', fontSize: 12, color: theme.textSec, marginTop: 2 }}>
+                    {busy ? 'Ouvindo amostra…' : 'Toque para ouvir'}
+                  </span>
+                </span>
+                <span style={{ fontSize: 22 }}>{busy ? '…' : '🔊'}</span>
+              </button>
             );
           })}
           {voiceErr && (
@@ -1385,7 +1348,7 @@ function SetupScreen({ onStart, theme, error, starting }) {
       
       <button
         type="button"
-        onClick={() => !sameLang && !starting && onStart({ langA, langB, audio, voiceA, voiceB, restSecs })}
+        onClick={() => !sameLang && !starting && onStart({ langA, langB, audio, voice, restSecs })}
         disabled={sameLang || starting}
         style={{
           width: '100%', padding: '17px', borderRadius: theme.radius, marginTop: 20,
