@@ -347,6 +347,15 @@ function parseSearchRequest(text, config, defaultLangId) {
   return { query, langId };
 }
 
+function cleanSearchAnswer(raw) {
+  const text = (raw || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) return '';
+  const firstSentence = text.match(/^.+?[.!?](?=\s|$)/)?.[0] || text;
+  return firstSentence.trim();
+}
+
 // Pesquisa na internet (API REST separada — não interfere no tradutor ao vivo)
 async function searchInternet(query, langId) {
   const lang = langById(langId);
@@ -396,7 +405,8 @@ async function searchInternet(query, langId) {
     .map(line => line.trim())
     .filter((line, idx, arr) => line && arr.indexOf(line) === idx)
     .join(' ');
-  if (text) return text;
+  const cleaned = cleanSearchAnswer(text);
+  if (cleaned) return cleaned;
   if (langId === 'it') return 'Non ho trovato la risposta.';
   if (langId === 'en-US' || langId === 'en-GB') return 'I could not find the answer.';
   return 'Não encontrei resposta.';
