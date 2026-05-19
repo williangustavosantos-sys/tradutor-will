@@ -922,10 +922,12 @@ function SetupScreen({ onStart, theme, error }) {
   const [langB, setLangB] = React.useState(() => localStorage.getItem('lang_b') || 'en-US');
   const [audio, setAudio] = React.useState(true);
   const [voice, setVoice] = React.useState(() => localStorage.getItem('voice') || 'Aoede');
+  const [restSecs, setRestSecs] = React.useState(() => parseInt(localStorage.getItem('restSecs')) || 60);
 
   React.useEffect(() => { localStorage.setItem('lang_a', langA); }, [langA]);
   React.useEffect(() => { localStorage.setItem('lang_b', langB); }, [langB]);
   React.useEffect(() => { localStorage.setItem('voice', voice); }, [voice]);
+  React.useEffect(() => { localStorage.setItem('restSecs', restSecs); }, [restSecs]);
 
   const swap = () => { const t = langA; setLangA(langB); setLangB(t); };
 
@@ -986,6 +988,21 @@ function SetupScreen({ onStart, theme, error }) {
         <IOSToggle value={audio} onChange={setAudio} theme={theme} />
       </OptionRow>
 
+      <OptionRow label="Descanso (seg)" theme={theme}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {[30, 45, 60, 90, 120].map(s => (
+            <button key={s} onClick={() => setRestSecs(s)} style={{
+              padding: '5px 10px', borderRadius: 8,
+              background: restSecs === s ? theme.primary : theme.cardBg,
+              color: restSecs === s ? '#fff' : theme.text,
+              border: restSecs === s ? 'none' : `1px solid ${theme.divider}`,
+              fontSize: 13, fontWeight: restSecs === s ? 600 : 400,
+              cursor: 'pointer', fontFamily: theme.font,
+            }}>{s}</button>
+          ))}
+        </div>
+      </OptionRow>
+
       {audio && (<>
         <label style={{
           fontSize: 12, fontWeight: 700, color: theme.textSec,
@@ -1037,7 +1054,7 @@ function SetupScreen({ onStart, theme, error }) {
       <div style={{ flex: 1, minHeight: 16 }} />
 
       <button
-        onClick={() => !sameLang && onStart({ langA, langB, audio, voice })}
+        onClick={() => !sameLang && onStart({ langA, langB, audio, voice, restSecs })}
         disabled={sameLang}
         style={{
           width: '100%', padding: '17px', borderRadius: theme.radius,
@@ -1066,8 +1083,58 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
   const [showLayoutMenu, setShowLayoutMenu] = React.useState(false);
   const [showKb, setShowKb] = React.useState(false);
   const [typing, setTyping] = React.useState('');
+  const [restLeft, setRestLeft] = React.useState(null);
+  const restIntervalRef = React.useRef(null);
+  const restTriggeredRef = React.useRef(false);
 
   React.useEffect(() => { localStorage.setItem('layout', layout); }, [layout]);
+
+  const REST_TRIGGERS = /\b(descanso|descansa|rest|break|riposo|pausa)\b/i;
+
+  React.useEffect(() => {
+    const all = [...translator.transA, ...translator.transB];
+    if (all.length === 0) return;
+    const last = all[all.length - 1];
+    if (!last || last.isOutput) return;
+    const key = last.text;
+    if (REST_TRIGGERS.test(key) && !restTriggeredRef.current && restLeft === null) {
+      restTriggeredRef.current = true;
+      setRestLeft(config.restSecs || 60);
+    }
+  }, [translator.transA, translator.transB]);
+
+  React.useEffect(() => {
+    if (restLeft === null) return;
+    if (restLeft <= 0) {
+      clearInterval(restIntervalRef.current);
+      restIntervalRef.current = null;
+      if (navigator.vibrate) navigator.vibrate([300, 100, 300, 100, 300]);
+      const actx = new (window.AudioContext || window.webkitAudioContext)();
+      [800, 1000, 1200].forEach((freq, i) => {
+        const osc = actx.createOscillator();
+        const gain = actx.createGain();
+        osc.frequency.value = freq;
+        osc.type = 'sine';
+        gain.gain.value = 0.3;
+        osc.connect(gain).connect(actx.destination);
+        osc.start(actx.currentTime + i * 0.2);
+        osc.stop(actx.currentTime + i * 0.2 + 0.15);
+      });
+      setTimeout(() => { setRestLeft(null); restTriggeredRef.current = false; }, 3000);
+      return;
+    }
+    restIntervalRef.current = setInterval(() => {
+      setRestLeft(prev => prev !== null && prev > 0 ? prev - 1 : prev);
+    }, 1000);
+    return () => clearInterval(restIntervalRef.current);
+  }, [restLeft]);
+
+  function cancelRest() {
+    clearInterval(restIntervalRef.current);
+    restIntervalRef.current = null;
+    setRestLeft(null);
+    restTriggeredRef.current = false;
+  }
 
   const langA = langById(config.langA);
   const langB = langById(config.langB);
@@ -1109,6 +1176,41 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
           <p style={{ color: 'rgba(255,255,255,0.12)', fontSize: 13, fontFamily: theme.font }}>
             Toque para ativar a tela
           </p>
+        </div>
+      )}
+
+      {restLeft !== null && (
+        <div style={{
+          position: 'absolute', top: '50%', left: '50%',
+          transform: 'translate(-50%, -50%)', zIndex: 70,
+          pointerEvents: 'none',
+        }}>
+          <div style={{
+            background: restLeft <= 0 ? theme.success + 'E6' : 'rgba(0,0,0,0.75)',
+            borderRadius: 20, padding: '20px 32px',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8,
+            backdropFilter: 'blur(8px)', pointerEvents: 'auto',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+            animation: restLeft <= 5 && restLeft > 0 ? 'pulse 0.5s infinite' : 'none',
+          }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'rgba(255,255,255,0.7)',
+              textTransform: 'uppercase', letterSpacing: 1 }}>
+              {restLeft <= 0 ? 'Descanso finalizado!' : 'Descanso'}
+            </span>
+            <span style={{
+              fontSize: 52, fontWeight: 200, color: '#fff',
+              fontVariantNumeric: 'tabular-nums', lineHeight: 1,
+              fontFamily: theme.font,
+            }}>
+              {restLeft <= 0 ? '00:00' : fmtTime(restLeft)}
+            </span>
+            <button onClick={cancelRest} style={{
+              marginTop: 4, padding: '6px 20px', borderRadius: 10,
+              background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.25)',
+              color: '#fff', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+              fontFamily: theme.font,
+            }}>{restLeft <= 0 ? 'Fechar' : 'Cancelar'}</button>
+          </div>
         </div>
       )}
 
