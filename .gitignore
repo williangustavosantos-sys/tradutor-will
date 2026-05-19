@@ -1,5 +1,18 @@
 .DS_Store
+.vercel
+
+# Dependências e artefatos locais
+node_modules/
+output/
+
+# Ferramentas / IDE
+.cursor/
+.claude/
+
+# Legado (não usado no deploy atual)
 tradutor/
 app.js
 style.css
-.vercel
+
+# Nome com espaços — usar logo-animado.mp4
+logo animado novo.mp4
