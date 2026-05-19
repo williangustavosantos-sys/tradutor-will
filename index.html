@@ -774,6 +774,53 @@ function useTranslator() {
 }
 
 // ==========================================
+// VOICE CARD (com botão de preview)
+// ==========================================
+function VoiceCard({ voice, selected, onSelect, onPreview, isPreviewing, theme }) {
+  return (
+    <div
+      onClick={onSelect}
+      style={{
+        padding: '9px 10px', borderRadius: theme.radius,
+        background: selected ? theme.primary + '12' : theme.cardBg,
+        border: selected ? `2px solid ${theme.primary}` : (theme.cardBorder || `1px solid ${theme.divider}`),
+        boxShadow: selected ? 'none' : theme.cardShadow,
+        cursor: 'pointer', display: 'flex', alignItems: 'center',
+        gap: 7, fontFamily: theme.font,
+      }}
+    >
+      <span style={{
+        fontSize: 13, fontWeight: 700, flexShrink: 0,
+        color: voice.gender === 'F' ? '#E91E8C' : '#2563EB',
+      }}>{voice.gender === 'F' ? '♀' : '♂'}</span>
+
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div style={{
+          fontSize: 13, fontWeight: selected ? 600 : 400,
+          color: selected ? theme.primary : theme.text,
+        }}>{voice.id}</div>
+        <div style={{ fontSize: 10, color: theme.textSec }}>{voice.desc}</div>
+      </div>
+
+      <button
+        onClick={(e) => { e.stopPropagation(); onPreview(); }}
+        title="Ouvir prévia"
+        style={{
+          width: 26, height: 26, borderRadius: '50%', flexShrink: 0,
+          background: isPreviewing ? theme.primary + '18' : 'transparent',
+          border: `1.5px solid ${isPreviewing ? theme.primary : theme.divider}`,
+          cursor: isPreviewing ? 'default' : 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          color: isPreviewing ? theme.primary : theme.textSec,
+          outline: 'none', transition: 'all 0.15s',
+          fontSize: isPreviewing ? 11 : 8,
+        }}
+      >{isPreviewing ? '♪' : '▶'}</button>
+    </div>
+  );
+}
+
+// ==========================================
 // SMALL COMPONENTS
 // ==========================================
 function LangCard({ lang, selected, onSelect, theme }) {
@@ -953,6 +1000,47 @@ function SetupScreen({ onStart, theme, error }) {
   React.useEffect(() => { localStorage.setItem('voice_a', voiceA); }, [voiceA]);
   React.useEffect(() => { localStorage.setItem('voice_b', voiceB); }, [voiceB]);
 
+  const [previewingVoice, setPreviewingVoice] = React.useState(null);
+
+  async function handlePreview(voiceName) {
+    if (previewingVoice) return;
+    const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
+    if (!apiKey) return;
+    setPreviewingVoice(voiceName);
+    try {
+      const resp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${encodeURIComponent(apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: 'Olá, tudo bem? Esta é minha voz.' }] }],
+            generationConfig: {
+              responseModalities: ['AUDIO'],
+              speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
+            },
+          }),
+        }
+      );
+      const data = await resp.json();
+      const b64 = data?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (!b64) throw new Error('sem áudio');
+      const buf = base64ToArrayBuffer(b64);
+      const int16 = new Int16Array(buf);
+      const f32 = int16ToFloat32(int16);
+      const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+      const ab = ctx.createBuffer(1, f32.length, 24000);
+      ab.copyToChannel(f32, 0);
+      const src = ctx.createBufferSource();
+      src.buffer = ab;
+      src.connect(ctx.destination);
+      src.start();
+      src.onended = () => { ctx.close(); setPreviewingVoice(null); };
+    } catch (e) {
+      setPreviewingVoice(null);
+    }
+  }
+
   const swap = () => {
     const tL = langA; setLangA(langB); setLangB(tL);
     const tV = voiceA; setVoiceA(voiceB); setVoiceB(tV);
@@ -1023,26 +1111,14 @@ function SetupScreen({ onStart, theme, error }) {
         }}>{langById(langA)?.flag} Voz — {langById(langA)?.label}</label>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 16 }}>
           {VOICES.map(v => (
-            <button key={v.id} onClick={() => setVoiceA(v.id)} style={{
-              padding: '9px 10px', borderRadius: theme.radius,
-              background: voiceA === v.id ? theme.primary + '12' : theme.cardBg,
-              border: voiceA === v.id ? `2px solid ${theme.primary}` : (theme.cardBorder || `1px solid ${theme.divider}`),
-              boxShadow: voiceA === v.id ? 'none' : theme.cardShadow,
-              cursor: 'pointer', textAlign: 'left', outline: 'none',
-              display: 'flex', alignItems: 'center', gap: 7, fontFamily: theme.font,
-            }}>
-              <span style={{
-                fontSize: 13, fontWeight: 700,
-                color: v.gender === 'F' ? '#E91E8C' : '#2563EB',
-              }}>{v.gender === 'F' ? '♀' : '♂'}</span>
-              <div style={{ minWidth: 0 }}>
-                <div style={{
-                  fontSize: 13, fontWeight: voiceA === v.id ? 600 : 400,
-                  color: voiceA === v.id ? theme.primary : theme.text,
-                }}>{v.id}</div>
-                <div style={{ fontSize: 10, color: theme.textSec }}>{v.desc}</div>
-              </div>
-            </button>
+            <VoiceCard
+              key={v.id} voice={v}
+              selected={voiceA === v.id}
+              onSelect={() => setVoiceA(v.id)}
+              onPreview={() => handlePreview(v.id)}
+              isPreviewing={previewingVoice === v.id}
+              theme={theme}
+            />
           ))}
         </div>
 
@@ -1053,26 +1129,14 @@ function SetupScreen({ onStart, theme, error }) {
         }}>{langById(langB)?.flag} Voz — {langById(langB)?.label}</label>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 6 }}>
           {VOICES.map(v => (
-            <button key={v.id} onClick={() => setVoiceB(v.id)} style={{
-              padding: '9px 10px', borderRadius: theme.radius,
-              background: voiceB === v.id ? theme.primary + '12' : theme.cardBg,
-              border: voiceB === v.id ? `2px solid ${theme.primary}` : (theme.cardBorder || `1px solid ${theme.divider}`),
-              boxShadow: voiceB === v.id ? 'none' : theme.cardShadow,
-              cursor: 'pointer', textAlign: 'left', outline: 'none',
-              display: 'flex', alignItems: 'center', gap: 7, fontFamily: theme.font,
-            }}>
-              <span style={{
-                fontSize: 13, fontWeight: 700,
-                color: v.gender === 'F' ? '#E91E8C' : '#2563EB',
-              }}>{v.gender === 'F' ? '♀' : '♂'}</span>
-              <div style={{ minWidth: 0 }}>
-                <div style={{
-                  fontSize: 13, fontWeight: voiceB === v.id ? 600 : 400,
-                  color: voiceB === v.id ? theme.primary : theme.text,
-                }}>{v.id}</div>
-                <div style={{ fontSize: 10, color: theme.textSec }}>{v.desc}</div>
-              </div>
-            </button>
+            <VoiceCard
+              key={v.id} voice={v}
+              selected={voiceB === v.id}
+              onSelect={() => setVoiceB(v.id)}
+              onPreview={() => handlePreview(v.id)}
+              isPreviewing={previewingVoice === v.id}
+              theme={theme}
+            />
           ))}
         </div>
       </>)}
