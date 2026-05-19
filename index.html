@@ -541,6 +541,90 @@ async function playVoiceSample(voiceName, langId) {
   });
 }
 
+// Fala o resultado de pesquisa via WebSocket separado (não interfere no tradutor)
+async function speakSearchResult(text, voiceName) {
+  if (!text || !text.trim()) return;
+  const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
+  if (!apiKey) return;
+
+  if (!previewAudioCtx) previewAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const ctx = previewAudioCtx;
+  if (ctx.state === 'suspended') await ctx.resume();
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let ws = null;
+    let nextPlay = 0;
+    let heardAudio = false;
+
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (ws) { try { ws.close(); } catch (_) {} }
+      const wait = heardAudio ? Math.max(200, (nextPlay - ctx.currentTime) * 1000 + 200) : 0;
+      setTimeout(resolve, wait);
+    };
+
+    const timer = setTimeout(done, 20000);
+
+    const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`;
+    ws = new WebSocket(url);
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        setup: {
+          model: GEMINI_MODEL,
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceName || 'Aoede' } } },
+            temperature: 0.1,
+          },
+          systemInstruction: {
+            parts: [{ text: 'Leia em voz alta exatamente o texto enviado pelo usuário, sem traduzir, sem alterar, sem comentar.' }],
+          },
+        },
+      }));
+    };
+
+    ws.onmessage = async (e) => {
+      const raw = e.data instanceof Blob ? await e.data.text() : e.data;
+      let msg; try { msg = JSON.parse(raw); } catch (_) { return; }
+      if (msg.setupComplete !== undefined) {
+        ws.send(JSON.stringify({
+          clientContent: { turns: [{ role: 'user', parts: [{ text: text.trim() }] }], turnComplete: true },
+        }));
+        return;
+      }
+      const sc = msg.serverContent;
+      if (!sc) return;
+      if (sc.modelTurn?.parts) {
+        if (ctx.state === 'suspended') await ctx.resume();
+        for (const part of sc.modelTurn.parts) {
+          if (part.inlineData?.mimeType?.startsWith('audio/pcm') && part.inlineData.data) {
+            const int16 = new Int16Array(base64ToArrayBuffer(part.inlineData.data));
+            const f32 = int16ToFloat32(int16);
+            if (f32.length === 0) continue;
+            heardAudio = true;
+            const ab = ctx.createBuffer(1, f32.length, 24000);
+            ab.copyToChannel(f32, 0);
+            const src = ctx.createBufferSource();
+            src.buffer = ab;
+            src.connect(ctx.destination);
+            const at = Math.max(nextPlay, ctx.currentTime);
+            src.start(at);
+            nextPlay = at + ab.duration;
+          }
+        }
+      }
+      if (sc.turnComplete) done();
+    };
+
+    ws.onerror = () => done();
+    ws.onclose = () => done();
+  });
+}
+
 // ==========================================
 // HOOK: useTranslator
 // ==========================================
@@ -1424,22 +1508,15 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
   const runSearch = React.useCallback(async (rawText) => {
     if (!rawText || !rawText.trim()) return;
     setSearchLoading(true);
+    translatorRef.current.setSearchMode(false, null);
+    setSearchMode(false);
     try {
       const { query, langId } = parseSearchRequest(rawText, config, config.langA);
       if (query) {
         const ans = await searchInternet(query, langId);
-        translatorRef.current.setSearchMode(false, null);
-        setSearchMode(false);
-        translatorRef.current.resumeAudioContexts?.();
-        translatorRef.current.speakResult?.(ans);
-      } else {
-        translatorRef.current.setSearchMode(false, null);
-        setSearchMode(false);
+        await speakSearchResult(ans, config.voice || 'Aoede');
       }
-    } catch (e) {
-      translatorRef.current.setSearchMode(false, null);
-      setSearchMode(false);
-    }
+    } catch (e) { /* silencioso */ }
     setSearchLoading(false);
   }, [config]);
 
