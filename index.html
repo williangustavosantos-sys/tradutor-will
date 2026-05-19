@@ -249,6 +249,13 @@ function buildSystemPrompt(langAId, langBId) {
     const variant = enLang.id === 'en-GB' ? 'uk' : 'us';
     base = base + variantSuffix(variant);
   }
+
+  // Instrução de vozes separadas por idioma (multiSpeakerVoiceConfig)
+  base = base + `\n\nPERSONAS DE VOZ — OBRIGATÓRIO:
+- Quando falar em ${a.label}: use a voz "VOZ_A"
+- Quando falar em ${b.label}: use a voz "VOZ_B"
+Alterne automaticamente de persona conforme o idioma da tradução produzida.`;
+
   return base;
 }
 
@@ -480,17 +487,35 @@ function useTranslator() {
 
   function sendSetup() {
     const cfg = configRef.current;
+    const vA = cfg.voiceA || cfg.voice || 'Aoede';
+    const vB = cfg.voiceB || cfg.voice || 'Puck';
+    const useDual = vA !== vB;
+
+    const speechCfg = useDual ? {
+      multiSpeakerVoiceConfig: {
+        speakerVoiceConfigs: [
+          { speaker: 'VOZ_A', voiceConfig: { prebuiltVoiceConfig: { voiceName: vA } } },
+          { speaker: 'VOZ_B', voiceConfig: { prebuiltVoiceConfig: { voiceName: vB } } },
+        ]
+      }
+    } : {
+      voiceConfig: { prebuiltVoiceConfig: { voiceName: vA } }
+    };
+
     wsRef.current.send(JSON.stringify({
       setup: {
         model: GEMINI_MODEL,
         generationConfig: {
           responseModalities: ['AUDIO'],
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: cfg.voice || 'Aoede' } } },
+          speechConfig: speechCfg,
           temperature: 0.3,
         },
         systemInstruction: { parts: [{ text: buildSystemPrompt(cfg.langA, cfg.langB) }] },
         outputAudioTranscription: {},
         inputAudioTranscription: {},
+        realtimeInputConfig: {
+          automaticActivityDetection: {},
+        },
       }
     }));
   }
@@ -869,11 +894,13 @@ function SetupScreen({ onStart, theme, error }) {
   const [langA, setLangA] = React.useState(() => localStorage.getItem('lang_a') || 'pt-BR');
   const [langB, setLangB] = React.useState(() => localStorage.getItem('lang_b') || 'en-US');
   const [audio, setAudio] = React.useState(true);
-  const [voice, setVoice] = React.useState(() => localStorage.getItem('voice') || 'Aoede');
+  const [voiceA, setVoiceA] = React.useState(() => localStorage.getItem('voice_a') || 'Aoede');
+  const [voiceB, setVoiceB] = React.useState(() => localStorage.getItem('voice_b') || 'Puck');
 
   React.useEffect(() => { localStorage.setItem('lang_a', langA); }, [langA]);
   React.useEffect(() => { localStorage.setItem('lang_b', langB); }, [langB]);
-  React.useEffect(() => { localStorage.setItem('voice', voice); }, [voice]);
+  React.useEffect(() => { localStorage.setItem('voice_a', voiceA); }, [voiceA]);
+  React.useEffect(() => { localStorage.setItem('voice_b', voiceB); }, [voiceB]);
 
   const swap = () => { const t = langA; setLangA(langB); setLangB(t); };
 
@@ -939,14 +966,14 @@ function SetupScreen({ onStart, theme, error }) {
           fontSize: 12, fontWeight: 700, color: theme.textSec,
           textTransform: 'uppercase', letterSpacing: 0.8, marginTop: 16, marginBottom: 8,
           display: 'block',
-        }}>Voz da tradução</label>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 6 }}>
+        }}>{langById(langA)?.flag} Voz — {langById(langA)?.label}</label>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 16 }}>
           {VOICES.map(v => (
-            <button key={v.id} onClick={() => setVoice(v.id)} style={{
+            <button key={v.id} onClick={() => setVoiceA(v.id)} style={{
               padding: '9px 10px', borderRadius: theme.radius,
-              background: voice === v.id ? theme.primary + '12' : theme.cardBg,
-              border: voice === v.id ? `2px solid ${theme.primary}` : (theme.cardBorder || `1px solid ${theme.divider}`),
-              boxShadow: voice === v.id ? 'none' : theme.cardShadow,
+              background: voiceA === v.id ? theme.primary + '12' : theme.cardBg,
+              border: voiceA === v.id ? `2px solid ${theme.primary}` : (theme.cardBorder || `1px solid ${theme.divider}`),
+              boxShadow: voiceA === v.id ? 'none' : theme.cardShadow,
               cursor: 'pointer', textAlign: 'left', outline: 'none',
               display: 'flex', alignItems: 'center', gap: 7, fontFamily: theme.font,
             }}>
@@ -956,8 +983,38 @@ function SetupScreen({ onStart, theme, error }) {
               }}>{v.gender === 'F' ? '♀' : '♂'}</span>
               <div style={{ minWidth: 0 }}>
                 <div style={{
-                  fontSize: 13, fontWeight: voice === v.id ? 600 : 400,
-                  color: voice === v.id ? theme.primary : theme.text,
+                  fontSize: 13, fontWeight: voiceA === v.id ? 600 : 400,
+                  color: voiceA === v.id ? theme.primary : theme.text,
+                }}>{v.id}</div>
+                <div style={{ fontSize: 10, color: theme.textSec }}>{v.desc}</div>
+              </div>
+            </button>
+          ))}
+        </div>
+
+        <label style={{
+          fontSize: 12, fontWeight: 700, color: theme.textSec,
+          textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8,
+          display: 'block',
+        }}>{langById(langB)?.flag} Voz — {langById(langB)?.label}</label>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 6 }}>
+          {VOICES.map(v => (
+            <button key={v.id} onClick={() => setVoiceB(v.id)} style={{
+              padding: '9px 10px', borderRadius: theme.radius,
+              background: voiceB === v.id ? theme.primary + '12' : theme.cardBg,
+              border: voiceB === v.id ? `2px solid ${theme.primary}` : (theme.cardBorder || `1px solid ${theme.divider}`),
+              boxShadow: voiceB === v.id ? 'none' : theme.cardShadow,
+              cursor: 'pointer', textAlign: 'left', outline: 'none',
+              display: 'flex', alignItems: 'center', gap: 7, fontFamily: theme.font,
+            }}>
+              <span style={{
+                fontSize: 13, fontWeight: 700,
+                color: v.gender === 'F' ? '#E91E8C' : '#2563EB',
+              }}>{v.gender === 'F' ? '♀' : '♂'}</span>
+              <div style={{ minWidth: 0 }}>
+                <div style={{
+                  fontSize: 13, fontWeight: voiceB === v.id ? 600 : 400,
+                  color: voiceB === v.id ? theme.primary : theme.text,
                 }}>{v.id}</div>
                 <div style={{ fontSize: 10, color: theme.textSec }}>{v.desc}</div>
               </div>
@@ -985,7 +1042,7 @@ function SetupScreen({ onStart, theme, error }) {
       <div style={{ flex: 1, minHeight: 16 }} />
 
       <button
-        onClick={() => !sameLang && onStart({ langA, langB, audio, voice })}
+        onClick={() => !sameLang && onStart({ langA, langB, audio, voiceA, voiceB })}
         disabled={sameLang}
         style={{
           width: '100%', padding: '17px', borderRadius: theme.radius,
