@@ -11,7 +11,7 @@ Usa a **Gemini Live API** (áudio bidirecional end-to-end) para traduzir convers
 4. O aluno fala em inglês → o app fala a tradução em português.
 5. O microfone fica aberto a sessão inteira — sem precisar tocar em nada.
 
-O glossário técnico de treinamento funcional e biomecânica (PT/EN) está embutido no arquivo [app.js](app.js) no topo, na constante `SYSTEM_PROMPT`. Para adicionar ou ajustar termos, edite essa lista.
+O glossário técnico de treinamento funcional e biomecânica está embutido no arquivo `index.html`, nas constantes `PROMPT_PT_EN`, `PROMPT_PT_IT` e `PROMPT_EN_IT`.
 
 ## Como obter a API key (uma vez só)
 
@@ -66,7 +66,7 @@ Na primeira vez que tocar em "Iniciar Sessão", o iPhone vai pedir:
 
 - **Precisa de internet** — sem conexão, a API não funciona.
 - **Tela acesa durante a sessão** — para Modo Solo isso é OK (celular no suporte). O **Modo Pareado** (com fone, celular no bolso) será adicionado na próxima versão.
-- **Sessões muito longas (>1h)** — pode haver desconexão automática da API; o app reconecta sozinho, mas pode perder um pequeno trecho da conversa nesse momento.
+- **Sessões muito longas (>1h)** — a Live API pode encerrar conexões longas. O app renova a conexão de forma preventiva durante a sessão e reaplica o contexto recente ao prompt para continuar traduzindo com sentido.
 - **Ícones** — placeholders. Você pode substituir `icon-192.png` e `icon-512.png` por imagens próprias.
 
 ## Estimativa de custo
@@ -84,7 +84,7 @@ Pela tabela atual da Gemini Live API (Google AI Studio):
 
 **Aluno não ouviu uma frase curta** — interjeições muito curtas ("hm", "ok") são propositalmente ignoradas. Fale a frase completa.
 
-**Tradução errada de um termo técnico** — edite o glossário em `app.js`, na constante `SYSTEM_PROMPT`. Faça novo upload pra Vercel/Netlify (arrastar de novo substitui).
+**Tradução errada de um termo técnico** — edite o glossário em `index.html`, na constante do par de idiomas usado. Faça novo upload pra Vercel/Netlify (arrastar de novo substitui).
 
 ## Roadmap
 

@@ -52,13 +52,6 @@
       from { opacity: 0; }
       to { opacity: 1; }
     }
-
-    @keyframes splashLogo {
-      0%   { opacity: 0; transform: scale(0.82); }
-      35%  { opacity: 1; transform: scale(1.02); }
-      55%  { transform: scale(1); }
-      100% { opacity: 1; transform: scale(1); }
-    }
   </style>
 </head>
 <body>
@@ -68,12 +61,13 @@
 // ==========================================
 // CONFIG (carregado de config.js)
 // ==========================================
-const APP_VERSION = 'v3-2026-05-19';
-console.log('Tradutor Will', APP_VERSION);
 const APP_CONFIG = window.TRADUTOR_CONFIG || {};
 const GEMINI_MODEL = APP_CONFIG.GEMINI_MODEL || 'models/gemini-3.1-flash-live-preview';
-const GEMINI_REST_MODEL = (APP_CONFIG.GEMINI_REST_MODEL || 'gemini-2.0-flash').replace(/^models\//, '');
+const GEMINI_REST_MODEL = (APP_CONFIG.GEMINI_REST_MODEL || 'gemini-2.5-flash').replace(/^models\//, '');
 const MAX_TRANSLATIONS = 60; // evita crescimento infinito em sessões longas (~90 min)
+const MAX_SESSION_HISTORY = 140;
+const MAX_CONTEXT_ENTRIES = 18;
+const PLANNED_RECONNECT_MS = 8.5 * 60 * 1000; // Live API pode encerrar conexões longas; renovamos antes.
 
 function geminiRestUrl(method) {
   return `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_REST_MODEL}:${method || 'generateContent'}`;
@@ -81,7 +75,8 @@ function geminiRestUrl(method) {
 
 // #region agent log
 const DEBUG_LOG = (location, message, data, hypothesisId) => {
-  fetch('http://127.0.0.1:7523/ingest/57946b5f-3a7e-40ac-9048-8872c7b4ff4c', {
+  if (!APP_CONFIG.DEBUG_LOG_ENDPOINT) return;
+  fetch(APP_CONFIG.DEBUG_LOG_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '5a4655' },
     body: JSON.stringify({ sessionId: '5a4655', location, message, data, timestamp: Date.now(), hypothesisId }),
@@ -166,9 +161,7 @@ EN→PT:
 - "let me rest" → "deixa eu descansar"
 
 Quando o falante usar gírias, adapte ao equivalente cultural — não traduza ao pé da letra.
-Em caso de dúvida, traduza pela intenção mais provável em contexto de treino físico.
-
-EXCEÇÃO ESPECIAL — FALE_DIRETO: Se o input do usuário começar exatamente com "FALE_DIRETO:", leia em voz alta EXATAMENTE o texto que segue essa marcação, no idioma em que está escrito, sem traduzir, sem comentar. Esta regra tem PRIORIDADE ABSOLUTA sobre todas as outras.`;
+Em caso de dúvida, traduza pela intenção mais provável em contexto de treino físico.`;
 
 const PROMPT_PT_IT = `Você é um intérprete invisível entre dois falantes:
 - Falante A: português brasileiro (PT-BR)
@@ -208,9 +201,7 @@ EXPRESSÕES COMUNS:
 - "estou cansado" → "sono stanco" / "está doendo" → "fa male"
 - "fala mais devagar" → "parla più lentamente"
 
-Em caso de dúvida, traduza pela intenção mais provável.
-
-EXCEÇÃO ESPECIAL — FALE_DIRETO: Se o input do usuário começar exatamente com "FALE_DIRETO:", leia em voz alta EXATAMENTE o texto que segue essa marcação, no idioma em que está escrito, sem traduzir, sem comentar. Esta regra tem PRIORIDADE ABSOLUTA sobre todas as outras.`;
+Em caso de dúvida, traduza pela intenção mais provável.`;
 
 const PROMPT_EN_IT = `You are an invisible interpreter between two speakers:
 - Speaker A: English (EN)
@@ -245,9 +236,7 @@ COMMON EXPRESSIONS:
 - "I'm tired / it hurts" → "sono stanco / fa male"
 - "I don't understand / speak slower" → "non ho capito / parla più lentamente"
 
-Translate by the most likely intention in context.
-
-SPECIAL EXCEPTION — FALE_DIRETO: If the user input begins exactly with "FALE_DIRETO:", read aloud EXACTLY the text that follows that marker, in the language it is written in, without translating or commenting. This rule has ABSOLUTE PRIORITY over all others.`;
+Translate by the most likely intention in context.`;
 
 function variantSuffix(variant) {
   return variant === 'uk'
@@ -263,7 +252,7 @@ function variantSuffix(variant) {
       `- Ortografia americana: "color", "center", "realize", "favorite"`;
 }
 
-function buildSystemPrompt(langAId, langBId) {
+function buildSystemPrompt(langAId, langBId, recentContext) {
   const a = langById(langAId), b = langById(langBId);
   if (!a || !b) return PROMPT_PT_EN;
 
@@ -281,17 +270,38 @@ function buildSystemPrompt(langAId, langBId) {
     base = base + variantSuffix(variant);
   }
 
+  base += `\n\nREGRAS DE CONTEXTO DA SESSÃO:
+- Traduza a intenção completa do falante, não palavras isoladas.
+- Use o contexto recente para resolver pronomes, exercícios, cargas, séries, repetições, dor, lado do corpo e correções de técnica.
+- Se uma fala curta depender da anterior ("mais duas", "assim?", "aqui dói"), traduza mantendo esse sentido operacional.
+- Não invente dados que não foram ditos. Se faltar informação, preserve a ambiguidade sem explicar.
+- Após reconexão, continue como se fosse a mesma sessão; não cumprimente, não anuncie retomada e não comente sobre conexão.`;
+
+  if (recentContext) {
+    base += `\n\nCONTEXTO RECENTE VALIDADO DA SESSÃO:
+${recentContext}
+
+Use este contexto apenas para manter continuidade semântica. Não repita o histórico.`;
+  }
+
   return base;
 }
-
 
 // Extrai idioma da resposta e limpa a pergunta (ex.: "... responde em inglês")
 function parseSearchRequest(text, config, defaultLangId) {
   let query = (text || '').trim();
   let langId = defaultLangId || config.langA;
 
-  const pickByBase = (base) => {
+  const pickByBase = (base, variant) => {
     const ids = [config.langA, config.langB];
+    if (base === 'en' && variant === 'uk') {
+      const inSessionUk = ids.find(id => id === 'en-GB');
+      return inSessionUk || 'en-GB';
+    }
+    if (base === 'en' && variant === 'us') {
+      const inSessionUs = ids.find(id => id === 'en-US');
+      return inSessionUs || 'en-US';
+    }
     const inSession = ids.find(id => langById(id)?.base === base);
     if (inSession) return inSession;
     if (base === 'pt') return 'pt-BR';
@@ -301,23 +311,33 @@ function parseSearchRequest(text, config, defaultLangId) {
   };
 
   const rules = [
-    { re: /\b(?:responda?|responder|fala|falar|diz|diga|me\s+diga?)\s+em\s+portugu[eê]s(?:\s+brasileiro)?\b\s*[,:.\-]?\s*/gi, base: 'pt' },
-    { re: /\b(?:responda?|responder|fala|falar|diz|diga|me\s+diga?)\s+em\s+ingl[eê]s\b\s*[,:.\-]?\s*/gi, base: 'en' },
-    { re: /\b(?:responda?|responder|fala|falar|diz|diga|me\s+diga?)\s+em\s+italiano\b\s*[,:.\-]?\s*/gi, base: 'it' },
-    { re: /\b(?:respond|answer|speak|say|tell\s+me)\s+in\s+(?:english|ingl[eê]s)\b\s*[,:.\-]?\s*/gi, base: 'en' },
-    { re: /\b(?:respond|answer|speak|say|tell\s+me)\s+in\s+(?:portuguese|portugu[eê]s)\b\s*[,:.\-]?\s*/gi, base: 'pt' },
-    { re: /\b(?:rispondi|rispondere|parla|dimmi)\s+in\s+italiano\b\s*[,:.\-]?\s*/gi, base: 'it' },
-    { re: /\bem\s+portugu[eê]s(?:\s+brasileiro)?\s*[,:.\-]?\s*$/gi, base: 'pt' },
-    { re: /\bem\s+ingl[eê]s\s*[,:.\-]?\s*$/gi, base: 'en' },
-    { re: /\bem\s+italiano\s*[,:.\-]?\s*$/gi, base: 'it' },
-    { re: /\bin\s+english\s*[,:.\-]?\s*$/gi, base: 'en' },
-    { re: /\bin\s+(?:portuguese|portugu[eê]s)\s*[,:.\-]?\s*$/gi, base: 'pt' },
-    { re: /\bin\s+italian(?:o)?\s*[,:.\-]?\s*$/gi, base: 'it' },
+    { re: /(?:^|[\s,.])(?:responde|responda|responder|fala|falar|diz|diga|em)\s+(?:em\s+)?portugu[eê]s(?:\s+brasileiro)?\s*[,:.\-]?\s*/gi, base: 'pt' },
+    { re: /(?:^|[\s,.])(?:responde|responda|responder|fala|falar|diz|diga)\s+(?:em\s+)?(?:ingl[eê]s|english)\s+(?:brit[aâ]nico|uk|gb|british)\s*[,:.\-]?\s*/gi, base: 'en', variant: 'uk' },
+    { re: /(?:^|[\s,.])(?:responde|responda|responder|fala|falar|diz|diga)\s+(?:em\s+)?(?:ingl[eê]s|english)\s+(?:americano|us|usa|american)\s*[,:.\-]?\s*/gi, base: 'en', variant: 'us' },
+    { re: /(?:^|[\s,.])(?:responde|responda|responder|fala|falar|diz|diga)\s+(?:em\s+)?(?:english|ingl[eê]s)\s*[,:.\-]?\s*/gi, base: 'en' },
+    { re: /(?:^|[\s,.])(?:responde|responda|responder|fala|falar|diz|diga)\s+(?:em\s+)?italiano\s*[,:.\-]?\s*/gi, base: 'it' },
+    { re: /(?:^|[\s,.])(?:respond|answer|speak|say)\s+(?:in\s+)?(?:british\s+english|english\s+uk|uk\s+english)\s*[,:.\-]?\s*/gi, base: 'en', variant: 'uk' },
+    { re: /(?:^|[\s,.])(?:respond|answer|speak|say)\s+(?:in\s+)?(?:american\s+english|english\s+us|us\s+english)\s*[,:.\-]?\s*/gi, base: 'en', variant: 'us' },
+    { re: /(?:^|[\s,.])(?:respond|answer|speak|say)\s+(?:in\s+)?(?:english|ingl[eê]s)\s*[,:.\-]?\s*/gi, base: 'en' },
+    { re: /(?:^|[\s,.])(?:respond|answer|speak|say)\s+(?:in\s+)?(?:portuguese|portugu[eê]s)\s*[,:.\-]?\s*/gi, base: 'pt' },
+    { re: /(?:^|[\s,.])(?:respond|answer|speak|say)\s+(?:in\s+)?italian\s*[,:.\-]?\s*/gi, base: 'it' },
+    { re: /(?:^|[\s,.])(?:rispondi|rispondere|parla|dimmi)\s+(?:in\s+)?(?:portoghese|portuguese|portugu[eê]s)\s*[,:.\-]?\s*/gi, base: 'pt' },
+    { re: /(?:^|[\s,.])(?:rispondi|rispondere|parla|dimmi)\s+(?:in\s+)?(?:inglese|english)\s*[,:.\-]?\s*/gi, base: 'en' },
+    { re: /(?:^|[\s,.])(?:rispondi|rispondere|parla|dimmi|in)\s+(?:in\s+)?italiano\s*[,:.\-]?\s*/gi, base: 'it' },
+    { re: /(?:^|[\s,.])(?:em\s+)?portugu[eê]s\s*[,:.\-]?\s*$/gi, base: 'pt' },
+    { re: /(?:^|[\s,.])(?:em\s+)?ingl[eê]s\s+(?:brit[aâ]nico|uk|gb)\s*[,:.\-]?\s*$/gi, base: 'en', variant: 'uk' },
+    { re: /(?:^|[\s,.])(?:em\s+)?ingl[eê]s\s+(?:americano|us|usa)\s*[,:.\-]?\s*$/gi, base: 'en', variant: 'us' },
+    { re: /(?:^|[\s,.])(?:in\s+)?(?:english|ingl[eê]s)\s*[,:.\-]?\s*$/gi, base: 'en' },
+    { re: /(?:^|[\s,.])(?:in\s+)?italiano\s*[,:.\-]?\s*$/gi, base: 'it' },
+    { re: /(?:^|[\s,.])(?:in\s+)?italian\s*[,:.\-]?\s*$/gi, base: 'it' },
+    { re: /\b(responde|responda|responder)\s+em\s+(pt|portugu[eê]s)\b/gi, base: 'pt' },
+    { re: /\b(respond|answer)\s+in\s+(en|english|ingl[eê]s)\b/gi, base: 'en' },
+    { re: /\b(rispondi|rispondere)\s+in\s+(it|italiano)\b/gi, base: 'it' },
   ];
 
-  for (const { re, base } of rules) {
+  for (const { re, base, variant } of rules) {
     if (re.test(query)) {
-      langId = pickByBase(base);
+      langId = pickByBase(base, variant);
       query = query.replace(re, ' ').replace(/\s+/g, ' ').trim();
       re.lastIndex = 0;
     }
@@ -330,6 +350,13 @@ function parseSearchRequest(text, config, defaultLangId) {
 // Pesquisa na internet (API REST separada — não interfere no tradutor ao vivo)
 async function searchInternet(query, langId) {
   const lang = langById(langId);
+  const answerLanguage = lang?.id === 'pt-BR'
+    ? 'Português brasileiro'
+    : lang?.id === 'it'
+      ? 'Italiano'
+      : lang?.id === 'en-GB'
+        ? 'English (UK)'
+        : 'English (US)';
   const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
   if (!apiKey) throw new Error('Falta a API key (config.js).');
   const res = await fetch(
@@ -338,10 +365,22 @@ async function searchInternet(query, langId) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: query.trim() }] }],
+        contents: [{
+          role: 'user',
+          parts: [{
+            text:
+              `Pergunta: ${query.trim()}\n` +
+              `Idioma obrigatório da resposta: ${answerLanguage}.\n` +
+              `Responda somente nesse idioma.`
+          }],
+        }],
         tools: [{ googleSearch: {} }],
+        generationConfig: {
+          temperature: 0,
+          maxOutputTokens: 120,
+        },
         systemInstruction: {
-          parts: [{ text: `Responda em ${lang?.label || 'português'}. Seja extremamente direto e curto: máximo 2 frases, sem introdução, sem explicação extra.` }],
+          parts: [{ text: `Você devolve respostas factuais para aparecerem como legenda de tradução. Responda obrigatoriamente em ${answerLanguage}. Use uma frase curta, sem introdução, sem explicação, sem lista e sem repetir a resposta.` }],
         },
       }),
     }
@@ -349,8 +388,24 @@ async function searchInternet(query, langId) {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error?.message || 'Erro na pesquisa');
   const parts = data.candidates?.[0]?.content?.parts || [];
-  const text = parts.map(p => p.text).filter(Boolean).join('\n');
-  return text || 'Não encontrei resposta.';
+  const text = parts
+    .map(p => p.text)
+    .filter(Boolean)
+    .join('\n')
+    .split('\n')
+    .map(line => line.trim())
+    .filter((line, idx, arr) => line && arr.indexOf(line) === idx)
+    .join(' ');
+  if (text) return text;
+  if (langId === 'it') return 'Non ho trovato la risposta.';
+  if (langId === 'en-US' || langId === 'en-GB') return 'I could not find the answer.';
+  return 'Não encontrei resposta.';
+}
+
+function searchErrorText(langId) {
+  if (langId === 'it') return 'Errore nella ricerca.';
+  if (langId === 'en-US' || langId === 'en-GB') return 'Search error.';
+  return 'Erro na pesquisa.';
 }
 
 // ==========================================
@@ -544,90 +599,6 @@ async function playVoiceSample(voiceName, langId) {
   });
 }
 
-// Fala o resultado de pesquisa via WebSocket separado (não interfere no tradutor)
-async function speakSearchResult(text, voiceName) {
-  if (!text || !text.trim()) return;
-  const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
-  if (!apiKey) return;
-
-  if (!previewAudioCtx) previewAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const ctx = previewAudioCtx;
-  if (ctx.state === 'suspended') await ctx.resume();
-
-  return new Promise((resolve) => {
-    let settled = false;
-    let ws = null;
-    let nextPlay = 0;
-    let heardAudio = false;
-
-    const done = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (ws) { try { ws.close(); } catch (_) {} }
-      const wait = heardAudio ? Math.max(200, (nextPlay - ctx.currentTime) * 1000 + 200) : 0;
-      setTimeout(resolve, wait);
-    };
-
-    const timer = setTimeout(done, 20000);
-
-    const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`;
-    ws = new WebSocket(url);
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({
-        setup: {
-          model: GEMINI_MODEL,
-          generationConfig: {
-            responseModalities: ['AUDIO'],
-            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceName || 'Aoede' } } },
-            temperature: 0.1,
-          },
-          systemInstruction: {
-            parts: [{ text: 'Leia em voz alta exatamente o texto enviado pelo usuário, sem traduzir, sem alterar, sem comentar.' }],
-          },
-        },
-      }));
-    };
-
-    ws.onmessage = async (e) => {
-      const raw = e.data instanceof Blob ? await e.data.text() : e.data;
-      let msg; try { msg = JSON.parse(raw); } catch (_) { return; }
-      if (msg.setupComplete !== undefined) {
-        ws.send(JSON.stringify({
-          clientContent: { turns: [{ role: 'user', parts: [{ text: text.trim() }] }], turnComplete: true },
-        }));
-        return;
-      }
-      const sc = msg.serverContent;
-      if (!sc) return;
-      if (sc.modelTurn?.parts) {
-        if (ctx.state === 'suspended') await ctx.resume();
-        for (const part of sc.modelTurn.parts) {
-          if (part.inlineData?.mimeType?.startsWith('audio/pcm') && part.inlineData.data) {
-            const int16 = new Int16Array(base64ToArrayBuffer(part.inlineData.data));
-            const f32 = int16ToFloat32(int16);
-            if (f32.length === 0) continue;
-            heardAudio = true;
-            const ab = ctx.createBuffer(1, f32.length, 24000);
-            ab.copyToChannel(f32, 0);
-            const src = ctx.createBufferSource();
-            src.buffer = ab;
-            src.connect(ctx.destination);
-            const at = Math.max(nextPlay, ctx.currentTime);
-            src.start(at);
-            nextPlay = at + ab.duration;
-          }
-        }
-      }
-      if (sc.turnComplete) done();
-    };
-
-    ws.onerror = () => done();
-    ws.onclose = () => done();
-  });
-}
-
 // ==========================================
 // HOOK: useTranslator
 // ==========================================
@@ -649,6 +620,8 @@ function useTranslator() {
   const wakeLockRef = React.useRef(null);
   const nextPlayTimeRef = React.useRef(0);
   const reconnectRef = React.useRef(0);
+  const reconnectTimerRef = React.useRef(null);
+  const plannedReconnectTimerRef = React.useRef(null);
   const timerRef = React.useRef(null);
   const startTimeRef = React.useRef(null);
   const pausedRef = React.useRef(false);
@@ -657,6 +630,8 @@ function useTranslator() {
   const statusRef = React.useRef('idle');
   const lastInputLangRef = React.useRef(null);
   const outputTargetRef = React.useRef(null);
+  const historyLogRef = React.useRef([]);
+  const manualSocketCloseRef = React.useRef(false);
   const inputAccumRef = React.useRef(false);
   const outputAccumRef = React.useRef(false);
   const isPlayingAudioRef = React.useRef(false);
@@ -670,11 +645,50 @@ function useTranslator() {
   React.useEffect(() => { audioOnRef.current = audioOn; }, [audioOn]);
   React.useEffect(() => { micOnRef.current = micOn; }, [micOn]);
   React.useEffect(() => { statusRef.current = status; }, [status]);
-  function resetTranscriptionState() {
+
+  React.useEffect(() => {
+    const onVisible = async () => {
+      if (document.visibilityState !== 'visible') return;
+      if (statusRef.current !== 'active') return;
+      await resumeAudioContexts();
+      await requestWakeLock();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
+  function resetTurnRouting() {
     lastInputLangRef.current = null;
     outputTargetRef.current = null;
     inputAccumRef.current = false;
     outputAccumRef.current = false;
+  }
+
+  function resetTranscriptionState() {
+    resetTurnRouting();
+    historyLogRef.current = [];
+  }
+
+  function pushHistory(entry, replaceLast) {
+    if (replaceLast && historyLogRef.current.length > 0) {
+      historyLogRef.current[historyLogRef.current.length - 1] = entry;
+    } else {
+      historyLogRef.current.push(entry);
+    }
+    if (historyLogRef.current.length > MAX_SESSION_HISTORY) {
+      historyLogRef.current = historyLogRef.current.slice(-MAX_SESSION_HISTORY);
+    }
+  }
+
+  function recentContextText() {
+    const cfg = configRef.current;
+    if (!cfg) return '';
+    const a = langById(cfg.langA), b = langById(cfg.langB);
+    return historyLogRef.current.slice(-MAX_CONTEXT_ENTRIES).map((h) => {
+      const side = h.side === 'A' ? a?.label : h.side === 'B' ? b?.label : 'desconhecido';
+      const kind = h.isOutput ? 'tradução' : 'fala original';
+      return `- ${side || 'idioma'} / ${kind}: ${h.text}`;
+    }).join('\n');
   }
 
   function beginNewTurn() {
@@ -687,6 +701,25 @@ function useTranslator() {
     if (detected === a.base && detected !== b.base) return 'A';
     if (detected === b.base && detected !== a.base) return 'B';
     return null;
+  }
+
+  function resolvePanelForLang(langId) {
+    const cfg = configRef.current;
+    if (!cfg) return 'B';
+    if (langId === cfg.langA) return 'A';
+    if (langId === cfg.langB) return 'B';
+    const lang = langById(langId);
+    const a = langById(cfg.langA), b = langById(cfg.langB);
+    if (lang?.base === a?.base && lang?.base !== b?.base) return 'A';
+    if (lang?.base === b?.base && lang?.base !== a?.base) return 'B';
+    return 'B';
+  }
+
+  function normalizeSearchLang(langId) {
+    if (langId === 'pt-BR' || langId === 'en-US' || langId === 'en-GB' || langId === 'it') {
+      return langId;
+    }
+    return configRef.current?.langB || 'en-US';
   }
 
   function setSearchMode(on, onUtterance) {
@@ -728,7 +761,7 @@ function useTranslator() {
     const target = resolveTarget(detected, a, b) || 'A';
     inputAccumRef.current = true;
 
-    const entry = { text, isOutput: false };
+    const entry = { text, isOutput: false, side: target, ts: Date.now() };
     const setter = target === 'A' ? setTransA : setTransB;
     setter(prev => {
       const next = isAccum && prev.length > 0 ? [...prev.slice(0, -1), entry] : [...prev, entry];
@@ -736,6 +769,7 @@ function useTranslator() {
       transLenRef.current[target] = capped.length;
       return capped;
     });
+    pushHistory(entry, isAccum);
   }
 
   // OUTPUT: a tradução gerada pelo modelo. Vai pro lado OPOSTO ao input.
@@ -770,15 +804,48 @@ function useTranslator() {
       let next;
       if (isAccum && prev.length > 0) {
         const last = prev[prev.length - 1];
-        next = [...prev.slice(0, -1), { text: last.text + ' ' + text, isOutput: true }];
+        const merged = { text: last.text + ' ' + text, isOutput: true, side: target, ts: last.ts || Date.now() };
+        next = [...prev.slice(0, -1), merged];
+        pushHistory(merged, true);
       } else {
-        next = [...prev, { text, isOutput: true }];
+        const entry = { text, isOutput: true, side: target, ts: Date.now() };
+        next = [...prev, entry];
+        pushHistory(entry, false);
       }
       const capped = next.length > MAX_TRANSLATIONS ? next.slice(-MAX_TRANSLATIONS) : next;
       transLenRef.current[target] = capped.length;
       return capped;
     });
 
+    if (navigator.vibrate) navigator.vibrate(50);
+  }
+
+  function speakSearchResult(text, langId) {
+    if (!audioOnRef.current || !('speechSynthesis' in window)) return;
+    const normalizedLangId = normalizeSearchLang(langId);
+    const lang = langById(normalizedLangId);
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = lang?.id === 'it' ? 'it-IT' : (lang?.id || 'pt-BR');
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  }
+
+  function addSearchResult(text, langId) {
+    if (!text || !text.trim()) return;
+    const normalizedLangId = normalizeSearchLang(langId);
+    const target = resolvePanelForLang(normalizedLangId);
+    const entry = { text: text.trim(), isOutput: true, side: target, ts: Date.now(), isSearch: true, langId: normalizedLangId };
+    const setter = target === 'A' ? setTransA : setTransB;
+    setter(prev => {
+      const next = [...prev, entry];
+      const capped = next.length > MAX_TRANSLATIONS ? next.slice(-MAX_TRANSLATIONS) : next;
+      transLenRef.current[target] = capped.length;
+      return capped;
+    });
+    pushHistory(entry, false);
+    speakSearchResult(entry.text, normalizedLangId);
     if (navigator.vibrate) navigator.vibrate(50);
   }
 
@@ -789,6 +856,10 @@ function useTranslator() {
       return;
     }
     if (!outputCtxRef.current) return;
+    if (outputCtxRef.current.state === 'suspended') {
+      outputCtxRef.current.resume().catch(() => {});
+      return;
+    }
     const buf = base64ToArrayBuffer(b64);
     const int16 = new Int16Array(buf);
     const f32 = int16ToFloat32(int16);
@@ -820,18 +891,21 @@ function useTranslator() {
 
   function sendSetup() {
     const cfg = configRef.current;
-    const voiceName = cfg.voice || 'Aoede';
+    const context = recentContextText();
     wsRef.current.send(JSON.stringify({
       setup: {
         model: GEMINI_MODEL,
         generationConfig: {
           responseModalities: ['AUDIO'],
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: cfg.voice || 'Aoede' } } },
           temperature: 0.3,
         },
-        systemInstruction: { parts: [{ text: buildSystemPrompt(cfg.langA, cfg.langB) }] },
+        systemInstruction: { parts: [{ text: buildSystemPrompt(cfg.langA, cfg.langB, context) }] },
         outputAudioTranscription: {},
         inputAudioTranscription: {},
+        realtimeInputConfig: {
+          automaticActivityDetection: {},
+        },
       }
     }));
   }
@@ -846,6 +920,10 @@ function useTranslator() {
       // #endregion
       setError(errMsg);
       if (rejectSetup) rejectSetup(new Error(errMsg));
+      return;
+    }
+    if (msg.goAway) {
+      reconnectSoon('server-go-away', 250);
       return;
     }
     if (msg.setupComplete !== undefined) {
@@ -892,13 +970,14 @@ function useTranslator() {
       let settled = false;
       const timeout = setTimeout(() => {
         if (!settled) { settled = true; reject(new Error('Tempo esgotado ao conectar. Verifique sua API key e internet.')); }
-      }, 15000);
+      }, 30000);
       const ok = (v) => { if (!settled) { settled = true; clearTimeout(timeout); resolve(v); } };
       const fail = (e) => { if (!settled) { settled = true; clearTimeout(timeout); reject(e); } };
 
       const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`;
       const ws = new WebSocket(url);
       wsRef.current = ws;
+      manualSocketCloseRef.current = false;
       ws.onopen = () => sendSetup();
       ws.onmessage = async (e) => {
         const t = e.data instanceof Blob ? await e.data.text() : e.data;
@@ -915,11 +994,59 @@ function useTranslator() {
           fail(new Error(ev.reason || 'Conexão fechada antes de completar setup'));
           return;
         }
+        if (manualSocketCloseRef.current) {
+          manualSocketCloseRef.current = false;
+          return;
+        }
         if (statusRef.current === 'active' || pausedRef.current) {
           scheduleReconnect();
         }
       };
     });
+  }
+
+  function clearReconnectTimers() {
+    clearTimeout(reconnectTimerRef.current);
+    clearTimeout(plannedReconnectTimerRef.current);
+    reconnectTimerRef.current = null;
+    plannedReconnectTimerRef.current = null;
+  }
+
+  function schedulePlannedReconnect() {
+    clearTimeout(plannedReconnectTimerRef.current);
+    plannedReconnectTimerRef.current = setTimeout(() => {
+      reconnectSoon('preventive-refresh', 0);
+    }, PLANNED_RECONNECT_MS);
+  }
+
+  function reconnectSoon(reason, delay) {
+    if (statusRef.current === 'idle') return;
+    clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = setTimeout(async () => {
+      if (statusRef.current === 'idle') return;
+      setStatus('reconnecting');
+      resetTurnRouting();
+      interruptPlayback();
+      const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
+      try {
+        if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
+          manualSocketCloseRef.current = true;
+          try {
+            wsRef.current.onclose = null;
+            wsRef.current.close();
+          } catch (_) {}
+        }
+        await connectWebSocket(apiKey);
+        setError(null);
+        setStatus('active');
+        reconnectRef.current = 0;
+        schedulePlannedReconnect();
+        DEBUG_LOG('index.html:reconnectSoon', 'Reconnect ok', { reason }, 'R');
+      } catch (e) {
+        DEBUG_LOG('index.html:reconnectSoon', 'Reconnect failed', { reason, error: e.message }, 'R');
+        scheduleReconnect();
+      }
+    }, delay || 0);
   }
 
   function scheduleReconnect() {
@@ -931,12 +1058,17 @@ function useTranslator() {
     }
     setStatus('reconnecting');
     const delay = Math.min(1000 * reconnectRef.current, 5000);
-    setTimeout(async () => {
+    clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = setTimeout(async () => {
+      if (statusRef.current === 'idle') return;
       try {
         const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
+        resetTurnRouting();
         await connectWebSocket(apiKey);
+        setError(null);
         setStatus('active');
         reconnectRef.current = 0;
+        schedulePlannedReconnect();
       } catch (e) { scheduleReconnect(); }
     }, delay);
   }
@@ -1030,6 +1162,7 @@ function useTranslator() {
       await initAudio();
       await connectWebSocket(apiKey);
       setStatus('active');
+      schedulePlannedReconnect();
       startTimer();
       await requestWakeLock();
       // #region agent log
@@ -1050,6 +1183,7 @@ function useTranslator() {
   function stop() {
     setStatus('idle');
     setPaused(false);
+    clearReconnectTimers();
     if (wsRef.current) { try { wsRef.current.close(); } catch(e){} wsRef.current = null; }
     if (workletRef.current) { workletRef.current.disconnect(); workletRef.current = null; }
     if (micStreamRef.current) { micStreamRef.current.getTracks().forEach(t => t.stop()); micStreamRef.current = null; }
@@ -1099,29 +1233,11 @@ function useTranslator() {
     }));
   }
 
-  function addSearchResult(text, langId) {
-    if (!text || !text.trim()) return;
-    const cfg = configRef.current;
-    if (!cfg) return;
-    const a = langById(cfg.langA), b = langById(cfg.langB);
-    if (!a || !b) return;
-    const lang = langById(langId);
-    const base = lang?.base;
-    const target = base === a.base ? 'A' : 'B';
-    const entry = { text: text.trim(), isOutput: true };
-    const setter = target === 'A' ? setTransA : setTransB;
-    setter(prev => {
-      const next = [...prev, entry];
-      const capped = next.length > MAX_TRANSLATIONS ? next.slice(-MAX_TRANSLATIONS) : next;
-      transLenRef.current[target] = capped.length;
-      return capped;
-    });
-  }
-
   return {
     status, paused, audioOn, micOn, elapsed, error,
     transA, transB,
-    start, stop, pause, resume, toggleAudio, toggleMic, sendText, addSearchResult, setSearchMode, resumeAudioContexts,
+    start, stop, pause, resume, toggleAudio, toggleMic, sendText, setSearchMode, addSearchResult, resumeAudioContexts,
+    getHistory: () => historyLogRef.current.slice(),
   };
 }
 
@@ -1258,6 +1374,7 @@ function TranslationView({ lang, translations, theme, padTop, padBot, listening 
   } else if (lastOutIdx !== undefined) heroIdx = lastOutIdx;
   else if (lastInIdx !== undefined) heroIdx = lastInIdx;
   const latest = heroIdx >= 0 ? translations[heroIdx] : null;
+  const displayLang = latest?.langId ? (langById(latest.langId) || lang) : lang;
   const history = translations.filter((_, i) => i !== heroIdx).slice(-3);
 
   return (
@@ -1269,11 +1386,11 @@ function TranslationView({ lang, translations, theme, padTop, padBot, listening 
       minHeight: 0,
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-        <span style={{ fontSize: 18, lineHeight: 1 }}>{lang.flag}</span>
+        <span style={{ fontSize: 18, lineHeight: 1 }}>{displayLang.flag}</span>
         <span style={{
-          fontSize: 11, fontWeight: 700, color: lang.color,
+          fontSize: 11, fontWeight: 700, color: displayLang.color,
           textTransform: 'uppercase', letterSpacing: 0.8,
-        }}>{lang.label}</span>
+        }}>{displayLang.label}</span>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5 }}>
           <div style={{
             width: 6, height: 6, borderRadius: '50%',
@@ -1337,6 +1454,7 @@ function TranslationView({ lang, translations, theme, padTop, padBot, listening 
 function SetupScreen({ onStart, theme, error, starting }) {
   const [langA, setLangA] = React.useState(() => localStorage.getItem('lang_a') || 'pt-BR');
   const [langB, setLangB] = React.useState(() => localStorage.getItem('lang_b') || 'en-US');
+  const [apiKey, setApiKey] = React.useState(() => localStorage.getItem('gemini_api_key') || '');
   const [openPicker, setOpenPicker] = React.useState(null);
   const [audio, setAudio] = React.useState(true);
   const [voiceGender, setVoiceGender] = React.useState(() => {
@@ -1353,8 +1471,14 @@ function SetupScreen({ onStart, theme, error, starting }) {
   React.useEffect(() => { localStorage.setItem('lang_b', langB); }, [langB]);
   React.useEffect(() => { localStorage.setItem('voice', voice); }, [voice]);
   React.useEffect(() => { localStorage.setItem('restSecs', restSecs); }, [restSecs]);
+  React.useEffect(() => {
+    const trimmed = apiKey.trim();
+    if (trimmed) localStorage.setItem('gemini_api_key', trimmed);
+  }, [apiKey]);
 
   const sameLang = langA === langB;
+  const needsApiKey = !APP_CONFIG.DEFAULT_API_KEY;
+  const missingApiKey = needsApiKey && !apiKey.trim();
 
   async function pickVoice(gender) {
     setVoiceGender(gender);
@@ -1407,6 +1531,31 @@ function SetupScreen({ onStart, theme, error, starting }) {
           ))}
         </div>
       </OptionRow>
+
+      {needsApiKey && (
+        <div style={{ marginTop: 14 }}>
+          <label style={{
+            fontSize: 12, fontWeight: 700, color: theme.textSec,
+            textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8, display: 'block',
+          }}>Google AI Studio API Key</label>
+          <input
+            type="password"
+            value={apiKey}
+            onChange={e => setApiKey(e.target.value)}
+            placeholder="Cole sua chave aqui"
+            autoComplete="off"
+            style={{
+              width: '100%', padding: '14px 16px', borderRadius: theme.radius,
+              border: `1px solid ${missingApiKey ? theme.danger + '66' : theme.divider}`,
+              background: theme.cardBg, color: theme.text, fontSize: 15,
+              outline: 'none', fontFamily: theme.font,
+            }}
+          />
+          <p style={{ fontSize: 11, color: theme.textSec, margin: '6px 0 0', lineHeight: 1.35 }}>
+            Fica salva só neste navegador.
+          </p>
+        </div>
+      )}
 
       {audio && (
         <>
@@ -1468,14 +1617,14 @@ function SetupScreen({ onStart, theme, error, starting }) {
       
       <button
         type="button"
-        onClick={() => !sameLang && !starting && onStart({ langA, langB, audio, voice, restSecs })}
-        disabled={sameLang || starting}
+        onClick={() => !sameLang && !missingApiKey && !starting && onStart({ langA, langB, audio, voice, restSecs })}
+        disabled={sameLang || missingApiKey || starting}
         style={{
           width: '100%', padding: '17px', borderRadius: theme.radius, marginTop: 20,
-          background: (sameLang || starting) ? theme.textTer : theme.primary,
+          background: (sameLang || missingApiKey || starting) ? theme.textTer : theme.primary,
           color: '#FFF', border: 'none', fontSize: 17, fontWeight: 600,
-          cursor: (sameLang || starting) ? 'not-allowed' : 'pointer', fontFamily: theme.font,
-          boxShadow: (sameLang || starting) ? 'none' : `0 4px 14px ${theme.primary}40`,
+          cursor: (sameLang || missingApiKey || starting) ? 'not-allowed' : 'pointer', fontFamily: theme.font,
+          boxShadow: (sameLang || missingApiKey || starting) ? 'none' : `0 4px 14px ${theme.primary}40`,
         }}>{starting ? 'Conectando...' : 'Iniciar Sessão'}</button>
     </div>
   );
@@ -1495,7 +1644,9 @@ function fmtTime(secs) {
 function ActiveScreen({ config, theme, translator, onEnd }) {
   const [restLeft, setRestLeft] = React.useState(null);
   const [searchMode, setSearchMode] = React.useState(false);
+  const [searchLang, setSearchLang] = React.useState(config.langA);
   const [searchLoading, setSearchLoading] = React.useState(false);
+  const [searchHeard, setSearchHeard] = React.useState('');
   const [typedText, setTypedText] = React.useState('');
   const [layout, setLayout] = React.useState(() => localStorage.getItem('layout') || 'vertical');
   const [showLayoutMenu, setShowLayoutMenu] = React.useState(false);
@@ -1516,20 +1667,24 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
   }, [restLeft]);
 
   const runSearch = React.useCallback(async (rawText) => {
-    if (!rawText || !rawText.trim()) return;
+    const { query, langId } = parseSearchRequest(rawText, config, searchLang);
+    if (!query || searchLoading) return;
+    setSearchLang(langId);
     setSearchLoading(true);
-    translatorRef.current.setSearchMode(false, null);
-    setSearchMode(false);
+    setSearchHeard(query);
     try {
-      const { query, langId } = parseSearchRequest(rawText, config, config.langA);
-      if (query) {
-        const ans = await searchInternet(query, langId);
-        translatorRef.current.addSearchResult?.(ans, langId);
-        await speakSearchResult(ans, config.voice || 'Aoede');
-      }
-    } catch (e) { /* silencioso */ }
+      const ans = await searchInternet(query, langId);
+      translatorRef.current.addSearchResult?.(ans, langId);
+      DEBUG_LOG('index.html:runSearch', 'Search ok', { len: ans.length, langId }, 'F');
+    } catch (e) {
+      translatorRef.current.addSearchResult?.(searchErrorText(langId), langId);
+      DEBUG_LOG('index.html:runSearch', 'Search fail', { error: e.message }, 'F');
+    }
     setSearchLoading(false);
-  }, [config]);
+    setSearchMode(false);
+    setSearchHeard('');
+    translatorRef.current.setSearchMode(false, null);
+  }, [config, searchLang, searchLoading]);
 
   runSearchRef.current = runSearch;
 
@@ -1538,6 +1693,7 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
 
   React.useEffect(() => {
     translatorRef.current.setSearchMode(searchMode, (utterance) => {
+      setSearchHeard(utterance);
       runSearchRef.current?.(utterance);
     });
     return () => translatorRef.current.setSearchMode(false, null);
@@ -1553,14 +1709,21 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
   }
 
   function toggleSearchMode() {
-    setSearchMode(on => !on);
+    setSearchMode(on => {
+      const next = !on;
+      if (!next) {
+        setSearchHeard('');
+        setSearchLoading(false);
+      }
+      return next;
+    });
   }
 
   function submitInput() {
     const t = typedText.trim();
     if (!t) return;
     translator.resumeAudioContexts?.();
-    if (searchMode) { runSearch(t); setSearchMode(false); }
+    if (searchMode) runSearch(t);
     else translator.sendText(t);
     setTypedText('');
   }
@@ -1592,6 +1755,14 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
     }}>{child}</button>
   );
 
+  const actionBtn = (label, onClick, color, disabled) => (
+    <button onClick={onClick} disabled={disabled} style={{
+      flex: 1, padding: '14px 8px', borderRadius: theme.radius,
+      background: disabled ? theme.textTer : color,
+      color: '#FFF', border: 'none', fontSize: 15, fontWeight: 600,
+      cursor: disabled ? 'not-allowed' : 'pointer', fontFamily: theme.font,
+    }}>{label}</button>
+  );
 
   return (
     
@@ -1704,11 +1875,28 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
 
       {(searchMode || searchLoading) && (
         <div style={{
-          flexShrink: 0, padding: '6px 14px',
-          background: '#FFF8F0', borderTop: `1px solid #FF950040`,
-          fontSize: 12, color: '#C2410C', fontWeight: 600, textAlign: 'center',
+          flexShrink: 0, padding: '8px 14px', borderTop: `1px solid ${theme.divider}`,
+          background: '#FFF8F0',
         }}>
-          {searchLoading ? '🔎 Buscando…' : '🎙 Aguardando pergunta…'}
+          <p style={{ fontSize: 13, fontWeight: 600, color: '#C2410C', margin: 0 }}>
+            {searchLoading ? '🔎 Pesquisando…' : '🔍 Pesquisa armada — a próxima fala vira resposta no painel'}
+          </p>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+            {LANGUAGES.map(l => (
+              <button key={l.id} type="button" onClick={() => setSearchLang(l.id)} style={{
+                padding: '5px 10px', borderRadius: 8, fontSize: 12,
+                background: searchLang === l.id ? '#FF9500' : theme.cardBg,
+                color: searchLang === l.id ? '#fff' : theme.text,
+                border: searchLang === l.id ? 'none' : `1px solid ${theme.divider}`,
+                cursor: 'pointer', fontFamily: theme.font,
+              }}>{l.flag} {l.short}</button>
+            ))}
+          </div>
+          {searchHeard && (
+            <p style={{ fontSize: 12, color: theme.textSec, margin: '6px 0 0', fontStyle: 'italic' }}>
+              {searchLoading ? 'Buscando: ' : 'Próxima pergunta: '}{searchHeard}
+            </p>
+          )}
         </div>
       )}
 
@@ -1738,42 +1926,14 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
         </div>
       </div>
 
-      <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 20,
-        padding: '10px 16px 6px', flexShrink: 0,
-      }}>
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-          <button type="button" onClick={toggleSearchMode} style={{
-            width: 64, height: 64, borderRadius: '50%', border: 'none', cursor: 'pointer',
-            background: (searchMode || searchLoading)
-              ? '#FF9500'
-              : 'linear-gradient(135deg, #FF9500, #FF6B00)',
-            color: '#FFF', fontSize: 26, fontWeight: 700,
-            boxShadow: (searchMode || searchLoading)
-              ? '0 0 0 4px #FF950055, 0 4px 16px #FF950066'
-              : '0 4px 14px #FF950055',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            transform: (searchMode || searchLoading) ? 'scale(1.08)' : 'scale(1)',
-            transition: 'all 0.18s ease',
-          }}>{searchLoading ? '…' : '?'}</button>
-          <span style={{ fontSize: 10, color: theme.textSec, fontWeight: 600 }}>PERGUNTA</span>
-        </div>
-
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-          <button type="button" onClick={startRest} style={{
-            width: 64, height: 64, borderRadius: '50%', border: 'none', cursor: 'pointer',
-            background: 'linear-gradient(135deg, #5856D6, #3634A3)',
-            color: '#FFF', fontSize: 26,
-            boxShadow: '0 4px 14px #5856D655',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-          }}>⏱</button>
-          <span style={{ fontSize: 10, color: theme.textSec, fontWeight: 600 }}>DESCANSO</span>
-        </div>
+      <div style={{ padding: '10px 16px 6px', display: 'flex', gap: 10, flexShrink: 0, borderTop: `1px solid ${theme.divider}` }}>
+        {actionBtn(searchMode ? '✓ Tradutor' : '🔍 Pesquisar', toggleSearchMode, searchMode ? theme.textSec : '#FF9500', false)}
+        {actionBtn('⏱ Cronômetro', startRest, '#5856D6', false)}
       </div>
 
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
-        padding: '6px 16px 14px', flexShrink: 0,
+        padding: '6px 16px 12px', flexShrink: 0,
       }}>
         <span style={{ fontSize: 13, fontWeight: 600, color: theme.textSec, fontVariantNumeric: 'tabular-nums', minWidth: 42 }}>
           {fmtTime(translator.elapsed)}
@@ -1790,7 +1950,7 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
             <rect x="1" y="1" width="12" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
             <rect x="1" y="8" width="12" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
           </svg>,
-          { onClick: () => setShowLayoutMenu(v => !v), active: showLayoutMenu, title: 'Visualização' }
+          { onClick: () => setShowLayoutMenu(v => !v), active: showLayoutMenu, title: 'Visualização do chat' }
         )}
         {ctrlBtn('⏸', { onClick: translator.pause, title: 'Pausar' })}
         {ctrlBtn('⏹', { onClick: onEnd, danger: true, title: 'Encerrar' })}
@@ -1912,17 +2072,15 @@ function EndScreen({ elapsed, msgCount, history, onNew, theme }) {
 // SPLASH SCREEN
 // ==========================================
 function SplashScreen({ onDone }) {
-  const videoRef = React.useRef(null);
   const [fadeOut, setFadeOut] = React.useState(false);
 
   React.useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    const finish = () => { setFadeOut(true); setTimeout(onDone, 450); };
-    v.addEventListener('ended', finish);
-    v.play().catch(() => setTimeout(finish, 800));
-    const fallback = setTimeout(finish, 3500);
-    return () => { v.removeEventListener('ended', finish); clearTimeout(fallback); };
+    const fadeTimer = setTimeout(() => setFadeOut(true), 900);
+    const doneTimer = setTimeout(onDone, 1300);
+    return () => {
+      clearTimeout(fadeTimer);
+      clearTimeout(doneTimer);
+    };
   }, []);
 
   return (
@@ -1933,16 +2091,11 @@ function SplashScreen({ onDone }) {
       opacity: fadeOut ? 0 : 1,
       transition: 'opacity 0.45s ease-out',
     }}>
-      <video
-        ref={videoRef}
-        muted
-        playsInline
-        preload="auto"
-        style={{ width: '65vmin', height: '65vmin', objectFit: 'contain' }}
-      >
-        <source src="splash.webm" type="video/webm" />
-        <source src="splash.mp4" type="video/mp4" />
-      </video>
+      <img
+        src="logo.png"
+        alt="Will Translator"
+        style={{ width: 'min(58vmin, 300px)', height: 'auto', objectFit: 'contain' }}
+      />
     </div>
   );
 }
@@ -1974,7 +2127,7 @@ function TradutorApp() {
     setEndStats({
       elapsed: translator.elapsed,
       msgCount: translator.transA.length + translator.transB.length,
-      history: [...translator.transA, ...translator.transB],
+      history: translator.getHistory ? translator.getHistory() : [...translator.transA, ...translator.transB],
     });
     translator.stop();
     setScreen('end');
