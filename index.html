@@ -1825,12 +1825,17 @@ function EndScreen({ elapsed, msgCount, history, onNew, theme }) {
 // SPLASH SCREEN
 // ==========================================
 function SplashScreen({ onDone }) {
+  const videoRef = React.useRef(null);
   const [fadeOut, setFadeOut] = React.useState(false);
 
   React.useEffect(() => {
-    const showTimer = setTimeout(() => setFadeOut(true), 1600);
-    const doneTimer = setTimeout(onDone, 2050);
-    return () => { clearTimeout(showTimer); clearTimeout(doneTimer); };
+    const v = videoRef.current;
+    if (!v) return;
+    const finish = () => { setFadeOut(true); setTimeout(onDone, 450); };
+    v.addEventListener('ended', finish);
+    v.play().catch(() => setTimeout(finish, 800));
+    const fallback = setTimeout(finish, 3500);
+    return () => { v.removeEventListener('ended', finish); clearTimeout(fallback); };
   }, []);
 
   return (
@@ -1841,10 +1846,16 @@ function SplashScreen({ onDone }) {
       opacity: fadeOut ? 0 : 1,
       transition: 'opacity 0.45s ease-out',
     }}>
-      <img src="logo.png" alt="Will Translator" style={{
-        width: 'min(58vmin, 320px)', height: 'auto',
-        animation: 'splashLogo 1.2s cubic-bezier(0.16, 1, 0.3, 1) forwards',
-      }} />
+      <video
+        ref={videoRef}
+        muted
+        playsInline
+        preload="auto"
+        style={{ width: '65vmin', height: '65vmin', objectFit: 'contain' }}
+      >
+        <source src="splash.webm" type="video/webm" />
+        <source src="splash.mp4" type="video/mp4" />
+      </video>
     </div>
   );
 }
