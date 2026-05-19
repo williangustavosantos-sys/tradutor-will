@@ -223,20 +223,22 @@ const SEARCH_SUFFIX_PT = `
 === PESQUISA NA INTERNET ===
 EXCEÇÃO às regras de tradução: quando alguém disser "pesquisa", "pesquise", "busca", "procura", "search", "look up", "find out", "cerca", "ricerca" seguido de um assunto, você deve:
 1. Usar o Google Search para buscar informações atualizadas sobre o assunto.
-2. Responder com o resultado de forma clara e concisa NO IDIOMA DE QUEM PEDIU A PESQUISA.
-3. Se quem pediu fala português, responda em português. Se fala inglês, responda em inglês. Se fala italiano, responda em italiano.
-4. Após responder a pesquisa, volte ao modo de tradução normal.
-5. NÃO traduza o pedido de pesquisa — execute a pesquisa.`;
+2. O usuário pode especificar o idioma da resposta dizendo "pesquisa em inglês", "pesquisa em português", "search in english", "search in portuguese", etc.
+3. Se o idioma for especificado, responda NESSE idioma. Se NÃO for especificado, responda no idioma de quem pediu.
+4. Dê uma resposta clara, completa e bem estruturada. Fale os pontos principais com detalhes suficientes para que a pessoa entenda sem precisar ler nada — a resposta vai ser ouvida E vista como texto na tela.
+5. Após responder a pesquisa, volte ao modo de tradução normal.
+6. NÃO traduza o pedido de pesquisa — execute a pesquisa.`;
 
 const SEARCH_SUFFIX_EN = `
 
 === INTERNET SEARCH ===
 EXCEPTION to translation rules: when someone says "search", "look up", "find out", "pesquisa", "busca", "cerca", "ricerca" followed by a topic, you must:
 1. Use Google Search to find up-to-date information on the topic.
-2. Respond with the result clearly and concisely IN THE LANGUAGE OF THE PERSON WHO ASKED.
-3. If the requester speaks English, respond in English. If Portuguese, in Portuguese. If Italian, in Italian.
-4. After answering the search, return to normal translation mode.
-5. Do NOT translate the search request — execute the search.`;
+2. The user can specify the response language by saying "search in english", "search in portuguese", "pesquisa em inglês", etc.
+3. If a language is specified, respond IN THAT language. If NOT specified, respond in the language of the person who asked.
+4. Give a clear, complete, well-structured answer. Speak the key points with enough detail so the person can understand without reading — the answer will be heard AND shown as text on screen.
+5. After answering the search, return to normal translation mode.
+6. Do NOT translate the search request — execute the search.`;
 
 function variantSuffix(variant) {
   return variant === 'uk'
