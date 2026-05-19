@@ -1430,6 +1430,7 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
         const ans = await searchInternet(query, langId);
         translatorRef.current.setSearchMode(false, null);
         setSearchMode(false);
+        translatorRef.current.resumeAudioContexts?.();
         translatorRef.current.speakResult?.(ans);
       } else {
         translatorRef.current.setSearchMode(false, null);
@@ -1650,8 +1651,41 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
       </div>
 
       <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 20,
+        padding: '10px 16px 6px', flexShrink: 0,
+      }}>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+          <button type="button" onClick={toggleSearchMode} style={{
+            width: 64, height: 64, borderRadius: '50%', border: 'none', cursor: 'pointer',
+            background: (searchMode || searchLoading)
+              ? '#FF9500'
+              : 'linear-gradient(135deg, #FF9500, #FF6B00)',
+            color: '#FFF', fontSize: 26, fontWeight: 700,
+            boxShadow: (searchMode || searchLoading)
+              ? '0 0 0 4px #FF950055, 0 4px 16px #FF950066'
+              : '0 4px 14px #FF950055',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            transform: (searchMode || searchLoading) ? 'scale(1.08)' : 'scale(1)',
+            transition: 'all 0.18s ease',
+          }}>{searchLoading ? '…' : '?'}</button>
+          <span style={{ fontSize: 10, color: theme.textSec, fontWeight: 600 }}>PERGUNTA</span>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+          <button type="button" onClick={startRest} style={{
+            width: 64, height: 64, borderRadius: '50%', border: 'none', cursor: 'pointer',
+            background: 'linear-gradient(135deg, #5856D6, #3634A3)',
+            color: '#FFF', fontSize: 26,
+            boxShadow: '0 4px 14px #5856D655',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}>⏱</button>
+          <span style={{ fontSize: 10, color: theme.textSec, fontWeight: 600 }}>DESCANSO</span>
+        </div>
+      </div>
+
+      <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
-        padding: '8px 16px 14px', flexShrink: 0,
+        padding: '6px 16px 14px', flexShrink: 0,
       }}>
         <span style={{ fontSize: 13, fontWeight: 600, color: theme.textSec, fontVariantNumeric: 'tabular-nums', minWidth: 42 }}>
           {fmtTime(translator.elapsed)}
@@ -1663,12 +1697,6 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
         {ctrlBtn(translator.audioOn ? '🔊' : '🔇', {
           onClick: translator.toggleAudio, active: translator.audioOn, title: 'Áudio',
         })}
-        {ctrlBtn(searchLoading ? '…' : '?', {
-          onClick: toggleSearchMode,
-          active: searchMode || searchLoading,
-          title: 'Pergunta',
-        })}
-        {ctrlBtn('⏱', { onClick: startRest, title: 'Cronômetro' })}
         {ctrlBtn(
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
             <rect x="1" y="1" width="12" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
