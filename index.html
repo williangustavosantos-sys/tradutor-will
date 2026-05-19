@@ -385,9 +385,6 @@ function useTranslator() {
   const outputAccumRef = React.useRef(false);
   const isPlayingAudioRef = React.useRef(false);
   const playEndTimeoutRef = React.useRef(null);
-  const sessionHandleRef = React.useRef(null);
-  const activeVoiceRef = React.useRef(null);
-  const switchingVoiceRef = React.useRef(false);
 
   React.useEffect(() => { pausedRef.current = paused; }, [paused]);
   React.useEffect(() => { audioOnRef.current = audioOn; }, [audioOn]);
@@ -504,67 +501,22 @@ function useTranslator() {
     clearTimeout(playEndTimeoutRef.current);
   }
 
-  function sendSetup(voiceOverride) {
+  function sendSetup() {
     const cfg = configRef.current;
-    const voice = voiceOverride || activeVoiceRef.current || cfg.voiceA || 'Aoede';
-    activeVoiceRef.current = voice;
-    const setup = {
-      model: GEMINI_MODEL,
-      generationConfig: {
-        responseModalities: ['AUDIO'],
-        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } },
-        temperature: 0.3,
-        sessionResumption: sessionHandleRef.current
-          ? { handle: sessionHandleRef.current }
-          : {},
-      },
-      systemInstruction: { parts: [{ text: buildSystemPrompt(cfg.langA, cfg.langB) }] },
-      tools: [{ googleSearch: {} }],
-      outputAudioTranscription: {},
-      inputAudioTranscription: {},
-    };
-    wsRef.current.send(JSON.stringify({ setup }));
-  }
-
-  function voiceForOutputLang() {
-    const cfg = configRef.current;
-    if (!cfg) return null;
-    const inputLang = lastInputLangRef.current;
-    if (!inputLang) return null;
-    const a = langById(cfg.langA), b = langById(cfg.langB);
-    if (!a || !b) return null;
-    if (inputLang === a.base) return cfg.voiceB;
-    if (inputLang === b.base) return cfg.voiceA;
-    return null;
-  }
-
-  function maybeSwapVoice() {
-    if (switchingVoiceRef.current) return;
-    const needed = voiceForOutputLang();
-    if (!needed || needed === activeVoiceRef.current) return;
-    if (!sessionHandleRef.current) return;
-    switchingVoiceRef.current = true;
-    const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
-    const oldWs = wsRef.current;
-    if (oldWs) oldWs.close();
-    const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`;
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
-    ws.onopen = () => sendSetup(needed);
-    ws.onmessage = async (e) => {
-      const t = e.data instanceof Blob ? await e.data.text() : e.data;
-      handleServerMessage(t, null, null);
-    };
-    ws.onerror = () => { switchingVoiceRef.current = false; };
-    ws.onclose = (ev) => {
-      if (switchingVoiceRef.current) {
-        switchingVoiceRef.current = false;
-        return;
+    wsRef.current.send(JSON.stringify({
+      setup: {
+        model: GEMINI_MODEL,
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: cfg.voice || 'Aoede' } } },
+          temperature: 0.3,
+        },
+        systemInstruction: { parts: [{ text: buildSystemPrompt(cfg.langA, cfg.langB) }] },
+        tools: [{ googleSearch: {} }],
+        outputAudioTranscription: {},
+        inputAudioTranscription: {},
       }
-      if (statusRef.current === 'active' || pausedRef.current) {
-        scheduleReconnect();
-      }
-    };
+    }));
   }
 
   function handleServerMessage(text, resolveSetup, rejectSetup) {
@@ -576,12 +528,8 @@ function useTranslator() {
       return;
     }
     if (msg.setupComplete !== undefined) {
-      switchingVoiceRef.current = false;
       if (resolveSetup) resolveSetup();
       return;
-    }
-    if (msg.sessionResumptionUpdate?.newHandle) {
-      sessionHandleRef.current = msg.sessionResumptionUpdate.newHandle;
     }
     if (msg.toolCall) {
       setSearching(true);
@@ -612,7 +560,6 @@ function useTranslator() {
       outputAccumRef.current = false;
       outputTargetRef.current = null;
       if (searching) setSearching(false);
-      maybeSwapVoice();
     }
     if (sc.interrupted) {
       interruptPlayback();
@@ -722,9 +669,6 @@ function useTranslator() {
 
   async function start(config) {
     configRef.current = config;
-    activeVoiceRef.current = config.voiceA || 'Aoede';
-    sessionHandleRef.current = null;
-    switchingVoiceRef.current = false;
     const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
     if (!apiKey) {
       setError('Falta a API key (config.js).');
@@ -755,9 +699,6 @@ function useTranslator() {
   function stop() {
     setStatus('idle');
     setPaused(false);
-    sessionHandleRef.current = null;
-    activeVoiceRef.current = null;
-    switchingVoiceRef.current = false;
     if (wsRef.current) { try { wsRef.current.close(); } catch(e){} wsRef.current = null; }
     if (workletRef.current) { workletRef.current.disconnect(); workletRef.current = null; }
     if (micStreamRef.current) { micStreamRef.current.getTracks().forEach(t => t.stop()); micStreamRef.current = null; }
@@ -968,13 +909,11 @@ function SetupScreen({ onStart, theme, error }) {
   const [langA, setLangA] = React.useState(() => localStorage.getItem('lang_a') || 'pt-BR');
   const [langB, setLangB] = React.useState(() => localStorage.getItem('lang_b') || 'en-US');
   const [audio, setAudio] = React.useState(true);
-  const [voiceA, setVoiceA] = React.useState(() => localStorage.getItem('voiceA') || 'Aoede');
-  const [voiceB, setVoiceB] = React.useState(() => localStorage.getItem('voiceB') || 'Puck');
+  const [voice, setVoice] = React.useState(() => localStorage.getItem('voice') || 'Aoede');
 
   React.useEffect(() => { localStorage.setItem('lang_a', langA); }, [langA]);
   React.useEffect(() => { localStorage.setItem('lang_b', langB); }, [langB]);
-  React.useEffect(() => { localStorage.setItem('voiceA', voiceA); }, [voiceA]);
-  React.useEffect(() => { localStorage.setItem('voiceB', voiceB); }, [voiceB]);
+  React.useEffect(() => { localStorage.setItem('voice', voice); }, [voice]);
 
   const swap = () => { const t = langA; setLangA(langB); setLangB(t); };
 
@@ -1036,42 +975,35 @@ function SetupScreen({ onStart, theme, error }) {
       </OptionRow>
 
       {audio && (<>
-        {[
-          { label: `Voz — ${langById(langA)?.flag || ''} ${langById(langA)?.label || langA}`, value: voiceA, set: setVoiceA },
-          { label: `Voz — ${langById(langB)?.flag || ''} ${langById(langB)?.label || langB}`, value: voiceB, set: setVoiceB },
-        ].map((slot, idx) => (
-          <React.Fragment key={idx}>
-            <label style={{
-              fontSize: 12, fontWeight: 700, color: theme.textSec,
-              textTransform: 'uppercase', letterSpacing: 0.8, marginTop: idx === 0 ? 16 : 10, marginBottom: 8,
-              display: 'block',
-            }}>{slot.label}</label>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 6 }}>
-              {VOICES.map(v => (
-                <button key={v.id} onClick={() => slot.set(v.id)} style={{
-                  padding: '9px 10px', borderRadius: theme.radius,
-                  background: slot.value === v.id ? theme.primary + '12' : theme.cardBg,
-                  border: slot.value === v.id ? `2px solid ${theme.primary}` : (theme.cardBorder || `1px solid ${theme.divider}`),
-                  boxShadow: slot.value === v.id ? 'none' : theme.cardShadow,
-                  cursor: 'pointer', textAlign: 'left', outline: 'none',
-                  display: 'flex', alignItems: 'center', gap: 7, fontFamily: theme.font,
-                }}>
-                  <span style={{
-                    fontSize: 13, fontWeight: 700,
-                    color: v.gender === 'F' ? '#E91E8C' : '#2563EB',
-                  }}>{v.gender === 'F' ? '♀' : '♂'}</span>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{
-                      fontSize: 13, fontWeight: slot.value === v.id ? 600 : 400,
-                      color: slot.value === v.id ? theme.primary : theme.text,
-                    }}>{v.id}</div>
-                    <div style={{ fontSize: 10, color: theme.textSec }}>{v.desc}</div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </React.Fragment>
-        ))}
+        <label style={{
+          fontSize: 12, fontWeight: 700, color: theme.textSec,
+          textTransform: 'uppercase', letterSpacing: 0.8, marginTop: 16, marginBottom: 8,
+          display: 'block',
+        }}>Voz da tradução</label>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 6 }}>
+          {VOICES.map(v => (
+            <button key={v.id} onClick={() => setVoice(v.id)} style={{
+              padding: '9px 10px', borderRadius: theme.radius,
+              background: voice === v.id ? theme.primary + '12' : theme.cardBg,
+              border: voice === v.id ? `2px solid ${theme.primary}` : (theme.cardBorder || `1px solid ${theme.divider}`),
+              boxShadow: voice === v.id ? 'none' : theme.cardShadow,
+              cursor: 'pointer', textAlign: 'left', outline: 'none',
+              display: 'flex', alignItems: 'center', gap: 7, fontFamily: theme.font,
+            }}>
+              <span style={{
+                fontSize: 13, fontWeight: 700,
+                color: v.gender === 'F' ? '#E91E8C' : '#2563EB',
+              }}>{v.gender === 'F' ? '♀' : '♂'}</span>
+              <div style={{ minWidth: 0 }}>
+                <div style={{
+                  fontSize: 13, fontWeight: voice === v.id ? 600 : 400,
+                  color: voice === v.id ? theme.primary : theme.text,
+                }}>{v.id}</div>
+                <div style={{ fontSize: 10, color: theme.textSec }}>{v.desc}</div>
+              </div>
+            </button>
+          ))}
+        </div>
       </>)}
 
       {sameLang && (
@@ -1093,7 +1025,7 @@ function SetupScreen({ onStart, theme, error }) {
       <div style={{ flex: 1, minHeight: 16 }} />
 
       <button
-        onClick={() => !sameLang && onStart({ langA, langB, audio, voiceA, voiceB })}
+        onClick={() => !sameLang && onStart({ langA, langB, audio, voice })}
         disabled={sameLang}
         style={{
           width: '100%', padding: '17px', borderRadius: theme.radius,
