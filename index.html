@@ -1469,23 +1469,27 @@ function SplashScreen({ onDone }) {
   React.useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    const onEnd = () => {
-      setFadeOut(true);
-      setTimeout(onDone, 500);
+    const MIN_MS = 2800;
+    const startAt = Date.now();
+
+    const finish = () => {
+      const wait = Math.max(0, MIN_MS - (Date.now() - startAt));
+      setTimeout(() => {
+        setFadeOut(true);
+        setTimeout(onDone, 450);
+      }, wait);
     };
-    v.addEventListener('ended', onEnd);
-    v.play().catch(() => {
-      setTimeout(onDone, 800);
-    });
-    const fallback = setTimeout(onDone, 7000);
-    return () => { v.removeEventListener('ended', onEnd); clearTimeout(fallback); };
+
+    v.addEventListener('ended', finish);
+    v.play().catch(finish); // autoplay bloqueado → respeita MIN_MS igual
+    const fallback = setTimeout(finish, 8000);
+    return () => { v.removeEventListener('ended', finish); clearTimeout(fallback); };
   }, []);
 
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 9999,
       background: '#FFFFFF',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
       opacity: fadeOut ? 0 : 1,
       transition: 'opacity 0.45s ease-out',
     }}>
@@ -1494,7 +1498,13 @@ function SplashScreen({ onDone }) {
         muted
         playsInline
         preload="auto"
-        style={{ width: '65vmin', height: '65vmin', objectFit: 'contain', mixBlendMode: 'multiply' }}
+        style={{
+          position: 'absolute', inset: 0,
+          width: '100%', height: '100%',
+          objectFit: 'contain',
+          background: '#FFFFFF',   /* elimina listras pretas do letterbox com multiply */
+          mixBlendMode: 'multiply',
+        }}
       >
         <source src="splash.webm" type="video/webm" />
         <source src="splash.mp4" type="video/mp4" />
