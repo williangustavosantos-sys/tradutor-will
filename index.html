@@ -240,7 +240,7 @@ REGRAS:
 3. Idioma da resposta: "hey Will pesquisa em inglês..." ou "hey Will search in portuguese...". Sem especificar = idioma de quem pediu.
 4. Resposta clara e completa — será ouvida e vista como texto.
 5. Após responder, a PRÓXIMA frase é traduzida normalmente. SEMPRE.
-6. "hey Will descanso/rest/riposo" → NÃO é pesquisa, é comando do app. IGNORE, não faça nada, não traduza.`;
+6. "hey Will descanso/rest/riposo/break/pausa/descansa" → é comando do app, NÃO é pra você. Fique em SILÊNCIO ABSOLUTO. Não fale nada, não traduza, não responda, não reconheça. Zero output. Espere a próxima frase real para traduzir.`;
 
 const SEARCH_SUFFIX_EN = `
 
@@ -264,7 +264,7 @@ RULES:
 3. Response language: "hey Will search in portuguese..." or "hey Will pesquisa em inglês...". Unspecified = requester's language.
 4. Clear, complete answer — will be heard and shown as text.
 5. After answering, the NEXT sentence is translated normally. ALWAYS.
-6. "hey Will rest/descanso/riposo" → NOT a search, it's an app command. IGNORE it, do not translate.`;
+6. "hey Will rest/descanso/riposo/break/pausa/descansa" → app command, NOT for you. Stay COMPLETELY SILENT. Do not speak, do not translate, do not acknowledge, do not respond. Zero output. Wait for the next real sentence to translate.`;
 
 function variantSuffix(variant) {
   return variant === 'uk'
