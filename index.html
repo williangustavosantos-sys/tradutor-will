@@ -166,7 +166,9 @@ EN→PT:
 - "let me rest" → "deixa eu descansar"
 
 Quando o falante usar gírias, adapte ao equivalente cultural — não traduza ao pé da letra.
-Em caso de dúvida, traduza pela intenção mais provável em contexto de treino físico.`;
+Em caso de dúvida, traduza pela intenção mais provável em contexto de treino físico.
+
+EXCEÇÃO ESPECIAL — FALE_DIRETO: Se o input do usuário começar exatamente com "FALE_DIRETO:", leia em voz alta EXATAMENTE o texto que segue essa marcação, no idioma em que está escrito, sem traduzir, sem comentar. Esta regra tem PRIORIDADE ABSOLUTA sobre todas as outras.`;
 
 const PROMPT_PT_IT = `Você é um intérprete invisível entre dois falantes:
 - Falante A: português brasileiro (PT-BR)
@@ -206,7 +208,9 @@ EXPRESSÕES COMUNS:
 - "estou cansado" → "sono stanco" / "está doendo" → "fa male"
 - "fala mais devagar" → "parla più lentamente"
 
-Em caso de dúvida, traduza pela intenção mais provável.`;
+Em caso de dúvida, traduza pela intenção mais provável.
+
+EXCEÇÃO ESPECIAL — FALE_DIRETO: Se o input do usuário começar exatamente com "FALE_DIRETO:", leia em voz alta EXATAMENTE o texto que segue essa marcação, no idioma em que está escrito, sem traduzir, sem comentar. Esta regra tem PRIORIDADE ABSOLUTA sobre todas as outras.`;
 
 const PROMPT_EN_IT = `You are an invisible interpreter between two speakers:
 - Speaker A: English (EN)
@@ -241,7 +245,9 @@ COMMON EXPRESSIONS:
 - "I'm tired / it hurts" → "sono stanco / fa male"
 - "I don't understand / speak slower" → "non ho capito / parla più lentamente"
 
-Translate by the most likely intention in context.`;
+Translate by the most likely intention in context.
+
+SPECIAL EXCEPTION — FALE_DIRETO: If the user input begins exactly with "FALE_DIRETO:", read aloud EXACTLY the text that follows that marker, in the language it is written in, without translating or commenting. This rule has ABSOLUTE PRIORITY over all others.`;
 
 function variantSuffix(variant) {
   return variant === 'uk'
@@ -1006,10 +1012,22 @@ function useTranslator() {
     }));
   }
 
+  function speakResult(text) {
+    if (!text || !text.trim()) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    beginNewTurn();
+    wsRef.current.send(JSON.stringify({
+      clientContent: {
+        turns: [{ role: 'user', parts: [{ text: 'FALE_DIRETO: ' + text.trim() }] }],
+        turnComplete: true,
+      },
+    }));
+  }
+
   return {
     status, paused, audioOn, micOn, elapsed, error,
     transA, transB,
-    start, stop, pause, resume, toggleAudio, toggleMic, sendText, setSearchMode, resumeAudioContexts,
+    start, stop, pause, resume, toggleAudio, toggleMic, sendText, speakResult, setSearchMode, resumeAudioContexts,
   };
 }
 
@@ -1383,10 +1401,7 @@ function fmtTime(secs) {
 function ActiveScreen({ config, theme, translator, onEnd }) {
   const [restLeft, setRestLeft] = React.useState(null);
   const [searchMode, setSearchMode] = React.useState(false);
-  const [searchLang, setSearchLang] = React.useState(config.langA);
   const [searchLoading, setSearchLoading] = React.useState(false);
-  const [searchAnswer, setSearchAnswer] = React.useState(null);
-  const [searchHeard, setSearchHeard] = React.useState('');
   const [typedText, setTypedText] = React.useState('');
   const [layout, setLayout] = React.useState(() => localStorage.getItem('layout') || 'vertical');
   const [showLayoutMenu, setShowLayoutMenu] = React.useState(false);
@@ -1407,22 +1422,25 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
   }, [restLeft]);
 
   const runSearch = React.useCallback(async (rawText) => {
-    const { query, langId } = parseSearchRequest(rawText, config, searchLang);
-    if (!query || searchLoading) return;
-    setSearchLang(langId);
+    if (!rawText || !rawText.trim()) return;
     setSearchLoading(true);
-    setSearchAnswer(null);
-    setSearchHeard(query);
     try {
-      const ans = await searchInternet(query, langId);
-      setSearchAnswer(ans);
-      DEBUG_LOG('index.html:runSearch', 'Search ok', { len: ans.length, langId }, 'F');
+      const { query, langId } = parseSearchRequest(rawText, config, config.langA);
+      if (query) {
+        const ans = await searchInternet(query, langId);
+        translatorRef.current.setSearchMode(false, null);
+        setSearchMode(false);
+        translatorRef.current.speakResult?.(ans);
+      } else {
+        translatorRef.current.setSearchMode(false, null);
+        setSearchMode(false);
+      }
     } catch (e) {
-      setSearchAnswer('Erro: ' + e.message);
-      DEBUG_LOG('index.html:runSearch', 'Search fail', { error: e.message }, 'F');
+      translatorRef.current.setSearchMode(false, null);
+      setSearchMode(false);
     }
     setSearchLoading(false);
-  }, [config, searchLang, searchLoading]);
+  }, [config]);
 
   runSearchRef.current = runSearch;
 
@@ -1431,7 +1449,6 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
 
   React.useEffect(() => {
     translatorRef.current.setSearchMode(searchMode, (utterance) => {
-      setSearchHeard(utterance);
       runSearchRef.current?.(utterance);
     });
     return () => translatorRef.current.setSearchMode(false, null);
@@ -1447,22 +1464,14 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
   }
 
   function toggleSearchMode() {
-    setSearchMode(on => {
-      const next = !on;
-      if (!next) {
-        setSearchAnswer(null);
-        setSearchHeard('');
-        setSearchLoading(false);
-      }
-      return next;
-    });
+    setSearchMode(on => !on);
   }
 
   function submitInput() {
     const t = typedText.trim();
     if (!t) return;
     translator.resumeAudioContexts?.();
-    if (searchMode) runSearch(t);
+    if (searchMode) { runSearch(t); setSearchMode(false); }
     else translator.sendText(t);
     setTypedText('');
   }
@@ -1494,14 +1503,6 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
     }}>{child}</button>
   );
 
-  const actionBtn = (label, onClick, color, disabled) => (
-    <button onClick={onClick} disabled={disabled} style={{
-      flex: 1, padding: '14px 8px', borderRadius: theme.radius,
-      background: disabled ? theme.textTer : color,
-      color: '#FFF', border: 'none', fontSize: 15, fontWeight: 600,
-      cursor: disabled ? 'not-allowed' : 'pointer', fontFamily: theme.font,
-    }}>{label}</button>
-  );
 
   return (
     
@@ -1612,46 +1613,13 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
         </div>
       )}
 
-      {searchMode && (
+      {(searchMode || searchLoading) && (
         <div style={{
-          flexShrink: 0, padding: '10px 14px', borderTop: `1px solid ${theme.divider}`,
-          background: '#FFF8F0',
+          flexShrink: 0, padding: '6px 14px',
+          background: '#FFF8F0', borderTop: `1px solid #FF950040`,
+          fontSize: 12, color: '#C2410C', fontWeight: 600, textAlign: 'center',
         }}>
-          <p style={{ fontSize: 13, fontWeight: 600, color: '#C2410C', margin: '0 0 6px' }}>
-            🔍 Modo pesquisa — fale ou digite abaixo
-          </p>
-          <p style={{ fontSize: 11, color: theme.textSec, margin: '0 0 8px', lineHeight: 1.35 }}>
-            Diga o idioma da resposta (ex.: &quot;responde em inglês&quot;) ou toque:
-          </p>
-          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: searchAnswer || searchHeard ? 8 : 0 }}>
-            {LANGUAGES.map(l => (
-              <button key={l.id} type="button" onClick={() => setSearchLang(l.id)} style={{
-                padding: '5px 10px', borderRadius: 8, fontSize: 12,
-                background: searchLang === l.id ? '#FF9500' : theme.cardBg,
-                color: searchLang === l.id ? '#fff' : theme.text,
-                border: searchLang === l.id ? 'none' : `1px solid ${theme.divider}`,
-                cursor: 'pointer', fontFamily: theme.font,
-              }}>{l.flag} {l.short}</button>
-            ))}
-          </div>
-          {searchHeard && !searchAnswer && (
-            <p style={{ fontSize: 12, color: theme.textSec, margin: '6px 0 0', fontStyle: 'italic' }}>
-              {searchLoading ? '🔎 Buscando: ' : 'Ouviu: '}{searchHeard}
-            </p>
-          )}
-          {searchAnswer && (
-            <div style={{
-              marginTop: 8, padding: 10, borderRadius: 10,
-              background: theme.cardBg, maxHeight: '18vh', overflow: 'auto',
-            }}>
-              <p style={{ fontSize: 14, color: theme.text, lineHeight: 1.45, margin: 0 }}>{searchAnswer}</p>
-              <button type="button" onClick={() => { setSearchAnswer(null); setSearchHeard(''); }} style={{
-                marginTop: 8, padding: '6px 12px', borderRadius: 8, border: 'none',
-                background: theme.primary, color: '#fff', fontSize: 12, fontWeight: 600,
-                cursor: 'pointer', fontFamily: theme.font,
-              }}>Nova pergunta</button>
-            </div>
-          )}
+          {searchLoading ? '🔎 Buscando…' : '🎙 Aguardando pergunta…'}
         </div>
       )}
 
@@ -1681,14 +1649,9 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
         </div>
       </div>
 
-      <div style={{ padding: '10px 16px 6px', display: 'flex', gap: 10, flexShrink: 0, borderTop: `1px solid ${theme.divider}` }}>
-        {actionBtn(searchMode ? '✓ Tradutor' : '🔍 Pesquisar', toggleSearchMode, searchMode ? theme.textSec : '#FF9500', false)}
-        {actionBtn('⏱ Cronômetro', startRest, '#5856D6', false)}
-      </div>
-
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
-        padding: '6px 16px 12px', flexShrink: 0,
+        padding: '8px 16px 14px', flexShrink: 0,
       }}>
         <span style={{ fontSize: 13, fontWeight: 600, color: theme.textSec, fontVariantNumeric: 'tabular-nums', minWidth: 42 }}>
           {fmtTime(translator.elapsed)}
@@ -1700,12 +1663,18 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
         {ctrlBtn(translator.audioOn ? '🔊' : '🔇', {
           onClick: translator.toggleAudio, active: translator.audioOn, title: 'Áudio',
         })}
+        {ctrlBtn(searchLoading ? '…' : '?', {
+          onClick: toggleSearchMode,
+          active: searchMode || searchLoading,
+          title: 'Pergunta',
+        })}
+        {ctrlBtn('⏱', { onClick: startRest, title: 'Cronômetro' })}
         {ctrlBtn(
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
             <rect x="1" y="1" width="12" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
             <rect x="1" y="8" width="12" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
           </svg>,
-          { onClick: () => setShowLayoutMenu(v => !v), active: showLayoutMenu, title: 'Visualização do chat' }
+          { onClick: () => setShowLayoutMenu(v => !v), active: showLayoutMenu, title: 'Visualização' }
         )}
         {ctrlBtn('⏸', { onClick: translator.pause, title: 'Pausar' })}
         {ctrlBtn('⏹', { onClick: onEnd, danger: true, title: 'Encerrar' })}
