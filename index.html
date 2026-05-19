@@ -527,7 +527,7 @@ function useTranslator() {
   function sendSetup() {
     const cfg = configRef.current;
     const vA = cfg.voiceA || cfg.voice || 'Aoede';
-    const vB = cfg.voiceB || cfg.voice || 'Puck';
+    const vB = cfg.voiceB || cfg.voice || 'Aoede';
     const useDual = vA !== vB;
 
     const speechCfg = useDual ? {
@@ -946,7 +946,7 @@ function SetupScreen({ onStart, theme, error }) {
   const [langB, setLangB] = React.useState(() => localStorage.getItem('lang_b') || 'en-US');
   const [audio, setAudio] = React.useState(true);
   const [voiceA, setVoiceA] = React.useState(() => localStorage.getItem('voice_a') || 'Aoede');
-  const [voiceB, setVoiceB] = React.useState(() => localStorage.getItem('voice_b') || 'Puck');
+  const [voiceB, setVoiceB] = React.useState(() => localStorage.getItem('voice_b') || 'Aoede');
 
   React.useEffect(() => { localStorage.setItem('lang_a', langA); }, [langA]);
   React.useEffect(() => { localStorage.setItem('lang_b', langB); }, [langB]);
