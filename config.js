@@ -1,8 +1,9 @@
 // ============================================================
 // CONFIGURAÇÃO LOCAL — NÃO COMPARTILHAR ESTE ARQUIVO PUBLICAMENTE
 // ============================================================
-// Para deploy público, NÃO coloque a API key neste arquivo.
-// O app pede a chave na tela inicial e salva apenas no navegador.
+// Sua API key do Google AI Studio fica embutida aqui pra não precisar
+// digitar de novo. Quando o app for hospedado publicamente, qualquer
+// pessoa com a URL pode extrair esta chave do código-fonte.
 //
 // SE FOR DEPLOYAR EM URL PÚBLICA QUE OUTRAS PESSOAS POSSAM ACHAR:
 //   1. Apague este arquivo antes do deploy
@@ -15,7 +16,7 @@
 // ============================================================
 
 window.TRADUTOR_CONFIG = {
-  DEFAULT_API_KEY: '',
+  DEFAULT_API_KEY: 'AIzaSyDt28vDm1vO30JBniOAhwgKWFtsuArtxI0',
   DEFAULT_LANGUAGE_PAIR: 'pt-en',
   DEFAULT_ENGLISH_VARIANT: 'us',
   // Tradutor ao vivo (WebSocket)

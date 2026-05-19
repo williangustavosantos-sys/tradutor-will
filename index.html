@@ -1454,7 +1454,6 @@ function TranslationView({ lang, translations, theme, padTop, padBot, listening 
 function SetupScreen({ onStart, theme, error, starting }) {
   const [langA, setLangA] = React.useState(() => localStorage.getItem('lang_a') || 'pt-BR');
   const [langB, setLangB] = React.useState(() => localStorage.getItem('lang_b') || 'en-US');
-  const [apiKey, setApiKey] = React.useState(() => localStorage.getItem('gemini_api_key') || '');
   const [openPicker, setOpenPicker] = React.useState(null);
   const [audio, setAudio] = React.useState(true);
   const [voiceGender, setVoiceGender] = React.useState(() => {
@@ -1471,14 +1470,8 @@ function SetupScreen({ onStart, theme, error, starting }) {
   React.useEffect(() => { localStorage.setItem('lang_b', langB); }, [langB]);
   React.useEffect(() => { localStorage.setItem('voice', voice); }, [voice]);
   React.useEffect(() => { localStorage.setItem('restSecs', restSecs); }, [restSecs]);
-  React.useEffect(() => {
-    const trimmed = apiKey.trim();
-    if (trimmed) localStorage.setItem('gemini_api_key', trimmed);
-  }, [apiKey]);
 
   const sameLang = langA === langB;
-  const needsApiKey = !APP_CONFIG.DEFAULT_API_KEY;
-  const missingApiKey = needsApiKey && !apiKey.trim();
 
   async function pickVoice(gender) {
     setVoiceGender(gender);
@@ -1531,31 +1524,6 @@ function SetupScreen({ onStart, theme, error, starting }) {
           ))}
         </div>
       </OptionRow>
-
-      {needsApiKey && (
-        <div style={{ marginTop: 14 }}>
-          <label style={{
-            fontSize: 12, fontWeight: 700, color: theme.textSec,
-            textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8, display: 'block',
-          }}>Google AI Studio API Key</label>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={e => setApiKey(e.target.value)}
-            placeholder="Cole sua chave aqui"
-            autoComplete="off"
-            style={{
-              width: '100%', padding: '14px 16px', borderRadius: theme.radius,
-              border: `1px solid ${missingApiKey ? theme.danger + '66' : theme.divider}`,
-              background: theme.cardBg, color: theme.text, fontSize: 15,
-              outline: 'none', fontFamily: theme.font,
-            }}
-          />
-          <p style={{ fontSize: 11, color: theme.textSec, margin: '6px 0 0', lineHeight: 1.35 }}>
-            Fica salva só neste navegador.
-          </p>
-        </div>
-      )}
 
       {audio && (
         <>
@@ -1617,14 +1585,14 @@ function SetupScreen({ onStart, theme, error, starting }) {
       
       <button
         type="button"
-        onClick={() => !sameLang && !missingApiKey && !starting && onStart({ langA, langB, audio, voice, restSecs })}
-        disabled={sameLang || missingApiKey || starting}
+        onClick={() => !sameLang && !starting && onStart({ langA, langB, audio, voice, restSecs })}
+        disabled={sameLang || starting}
         style={{
           width: '100%', padding: '17px', borderRadius: theme.radius, marginTop: 20,
-          background: (sameLang || missingApiKey || starting) ? theme.textTer : theme.primary,
+          background: (sameLang || starting) ? theme.textTer : theme.primary,
           color: '#FFF', border: 'none', fontSize: 17, fontWeight: 600,
-          cursor: (sameLang || missingApiKey || starting) ? 'not-allowed' : 'pointer', fontFamily: theme.font,
-          boxShadow: (sameLang || missingApiKey || starting) ? 'none' : `0 4px 14px ${theme.primary}40`,
+          cursor: (sameLang || starting) ? 'not-allowed' : 'pointer', fontFamily: theme.font,
+          boxShadow: (sameLang || starting) ? 'none' : `0 4px 14px ${theme.primary}40`,
         }}>{starting ? 'Conectando...' : 'Iniciar Sessão'}</button>
     </div>
   );
