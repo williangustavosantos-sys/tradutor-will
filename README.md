@@ -11,7 +11,7 @@ Usa a **Gemini Live API** (áudio bidirecional end-to-end) para traduzir convers
 4. O aluno fala em inglês → o app fala a tradução em português.
 5. O microfone fica aberto a sessão inteira — sem precisar tocar em nada.
 
-O glossário técnico de treinamento funcional e biomecânica (PT/EN) está embutido no arquivo [app.js](app.js) no topo, na constante `SYSTEM_PROMPT`. Para adicionar ou ajustar termos, edite essa lista.
+O glossário técnico de treinamento funcional e biomecânica (PT/EN) está embutido no arquivo `index.html`, nas constantes `PROMPT_PT_EN`, `PROMPT_PT_IT` e `PROMPT_EN_IT`. Para adicionar ou ajustar termos, edite o trecho de glossário dentro da constante correspondente ao par de idiomas que você usa.
 
 ## Como obter a API key (uma vez só)
 
@@ -84,7 +84,7 @@ Pela tabela atual da Gemini Live API (Google AI Studio):
 
 **Aluno não ouviu uma frase curta** — interjeições muito curtas ("hm", "ok") são propositalmente ignoradas. Fale a frase completa.
 
-**Tradução errada de um termo técnico** — edite o glossário em `app.js`, na constante `SYSTEM_PROMPT`. Faça novo upload pra Vercel/Netlify (arrastar de novo substitui).
+**Tradução errada de um termo técnico** — edite o glossário em `index.html`, na constante `PROMPT_PT_EN` (ou `PROMPT_PT_IT` / `PROMPT_EN_IT`). Faça novo upload pra Vercel/Netlify (arrastar de novo substitui).
 
 ## Roadmap
 
