@@ -378,6 +378,25 @@ function useTranslator() {
   React.useEffect(() => { statusRef.current = status; }, [status]);
   React.useEffect(() => { localStorage.setItem('fontSize', fontSize); }, [fontSize]);
 
+  // Re-adquire wake lock e retoma AudioContexts ao voltar do background
+  React.useEffect(() => {
+    const onVisible = async () => {
+      if (document.visibilityState !== 'visible') return;
+      if (statusRef.current !== 'active') return;
+      try {
+        if ('wakeLock' in navigator && (!wakeLockRef.current || wakeLockRef.current.released)) {
+          wakeLockRef.current = await navigator.wakeLock.request('screen');
+        }
+      } catch (e) {}
+      try {
+        if (outputCtxRef.current?.state === 'suspended') await outputCtxRef.current.resume();
+        if (inputCtxRef.current?.state === 'suspended') await inputCtxRef.current.resume();
+      } catch (e) {}
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
   function resetTranscriptionState() {
     lastInputLangRef.current = null;
     outputTargetRef.current = null;
@@ -471,6 +490,11 @@ function useTranslator() {
   function playAudioChunk(b64) {
     if (!audioOnRef.current) return;
     if (!outputCtxRef.current) return;
+    // iOS pode suspender o AudioContext ao escurecer/voltar do background
+    if (outputCtxRef.current.state === 'suspended') {
+      outputCtxRef.current.resume().catch(() => {});
+      return; // chunk descartado; próximo (~100ms) já toca após resume
+    }
     const buf = base64ToArrayBuffer(b64);
     const int16 = new Int16Array(buf);
     const f32 = int16ToFloat32(int16);
@@ -620,6 +644,11 @@ function useTranslator() {
       if (statusRef.current === 'idle') return;
       try {
         const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
+        // Reseta acumulação (mas preserva histórico) para evitar routing errado pós-reconect
+        lastInputLangRef.current = null;
+        outputTargetRef.current = null;
+        inputAccumRef.current = false;
+        outputAccumRef.current = false;
         await connectWebSocket(apiKey);
         setStatus('active');
         reconnectRef.current = 0;
