@@ -22,5 +22,5 @@ window.TRADUTOR_CONFIG = {
   // Tradutor ao vivo (WebSocket)
   GEMINI_MODEL: 'models/gemini-3.1-flash-live-preview',
   // Pesquisa na internet (REST generateContent — só texto)
-  GEMINI_REST_MODEL: 'gemini-2.0-flash',
+  GEMINI_REST_MODEL: 'gemini-2.5-flash',
 };
