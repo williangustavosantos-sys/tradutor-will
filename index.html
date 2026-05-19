@@ -68,6 +68,8 @@
 // ==========================================
 // CONFIG (carregado de config.js)
 // ==========================================
+const APP_VERSION = 'v3-2026-05-19';
+console.log('Tradutor Will', APP_VERSION);
 const APP_CONFIG = window.TRADUTOR_CONFIG || {};
 const GEMINI_MODEL = APP_CONFIG.GEMINI_MODEL || 'models/gemini-3.1-flash-live-preview';
 const GEMINI_REST_MODEL = (APP_CONFIG.GEMINI_REST_MODEL || 'gemini-2.0-flash').replace(/^models\//, '');

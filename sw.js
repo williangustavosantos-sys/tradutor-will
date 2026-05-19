@@ -1,7 +1,7 @@
 // Service worker mínimo — só registra o app como PWA instalável.
 // Não faz cache offline (precisamos sempre conectar à API).
 
-const CACHE_NAME = 'tradutor-will-v1';
+const CACHE_NAME = 'tradutor-will-v3';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();
