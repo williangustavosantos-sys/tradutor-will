@@ -502,13 +502,12 @@ function int16ToFloat32(int16) {
 let previewAudioCtx = null;
 let previewVoiceAbort = null;
 
-// Preview usa a mesma Live API e o mesmo modelo da sessão (áudio não funciona no REST)
-async function playVoiceSample(voiceName, langId) {
+// Áudio curto usa Live API separada para não interferir no WebSocket do tradutor.
+async function playLiveSpeech(voiceName, langId, text, timeoutMs) {
   if (previewVoiceAbort) previewVoiceAbort();
 
   const lang = langById(langId);
-  const base = lang?.base || 'pt';
-  const phrase = VOICE_SAMPLE_PHRASE[base] || VOICE_SAMPLE_PHRASE.pt;
+  const phrase = text || VOICE_SAMPLE_PHRASE[lang?.base || 'pt'] || VOICE_SAMPLE_PHRASE.pt;
   const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
   if (!apiKey) throw new Error('Falta a API key (config.js).');
 
@@ -530,7 +529,7 @@ async function playVoiceSample(voiceName, langId) {
 
     previewVoiceAbort = () => done(new Error('Cancelado'));
 
-    const timer = setTimeout(() => done(new Error('Tempo esgotado ao ouvir a voz')), 15000);
+    const timer = setTimeout(() => done(new Error('Tempo esgotado ao ouvir a voz')), timeoutMs || 15000);
 
     if (!previewAudioCtx) previewAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const ctx = previewAudioCtx;
@@ -556,7 +555,7 @@ async function playVoiceSample(voiceName, langId) {
     ws.onopen = () => {
       ws.send(JSON.stringify({
         setup: {
-          model: GEMINI_MODEL,
+          model: GEMINI_MODEL_FALLBACKS[0],
           generationConfig: {
             responseModalities: ['AUDIO'],
             speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
@@ -659,6 +658,7 @@ function useTranslator() {
   const searchUtteranceBufRef = React.useRef('');
   const inputSampleRateRef = React.useRef(16000);
   const liveModelRef = React.useRef(GEMINI_MODEL_FALLBACKS[0]);
+  const suppressMicUntilRef = React.useRef(0);
 
   React.useEffect(() => { pausedRef.current = paused; }, [paused]);
   React.useEffect(() => { audioOnRef.current = audioOn; }, [audioOn]);
@@ -840,19 +840,30 @@ function useTranslator() {
   }
 
   function speakSearchResult(text, langId) {
-    if (!audioOnRef.current || !('speechSynthesis' in window)) return;
+    if (!audioOnRef.current) return;
     const normalizedLangId = normalizeSearchLang(langId);
-    const lang = langById(normalizedLangId);
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = lang?.id === 'it' ? 'it-IT' : (lang?.id || 'pt-BR');
-    utterance.rate = 1;
-    utterance.pitch = 1;
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(utterance);
+    const cfg = configRef.current || {};
+    suppressMicUntilRef.current = Date.now() + 13000;
+    playLiveSpeech(cfg.voice || 'Aoede', normalizedLangId, text, 12000).then(() => {
+      suppressMicUntilRef.current = Date.now() + 300;
+    }).catch(() => {
+      if (!('speechSynthesis' in window)) return;
+      const lang = langById(normalizedLangId);
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = lang?.id === 'it' ? 'it-IT' : (lang?.id || 'pt-BR');
+      utterance.rate = 1;
+      utterance.pitch = 1;
+      utterance.onend = () => { suppressMicUntilRef.current = Date.now() + 300; };
+      utterance.onerror = () => { suppressMicUntilRef.current = Date.now() + 300; };
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(utterance);
+    });
   }
 
   function addSearchResult(text, langId) {
     if (!text || !text.trim()) return;
+    setSearchMode(false, null);
+    resetTurnRouting();
     const normalizedLangId = normalizeSearchLang(langId);
     const target = resolvePanelForLang(normalizedLangId);
     const entry = { text: text.trim(), isOutput: true, side: target, ts: Date.now(), isSearch: true, langId: normalizedLangId };
@@ -863,7 +874,6 @@ function useTranslator() {
       transLenRef.current[target] = capped.length;
       return capped;
     });
-    pushHistory(entry, false);
     speakSearchResult(entry.text, normalizedLangId);
     if (navigator.vibrate) navigator.vibrate(50);
   }
@@ -1145,6 +1155,7 @@ function useTranslator() {
 
     const sendMicPcm = (buffer) => {
       if (pausedRef.current || !micOnRef.current) return;
+      if (Date.now() < suppressMicUntilRef.current) return;
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
       const b64 = arrayBufferToBase64(buffer);
       wsRef.current.send(JSON.stringify({
@@ -1566,8 +1577,6 @@ function SetupScreen({ onStart, theme, error, starting }) {
     const v = localStorage.getItem('voice');
     return v === VOICE_BY_GENDER.M.id ? 'M' : 'F';
   });
-  const [voiceBusy, setVoiceBusy] = React.useState(null);
-  const [voiceErr, setVoiceErr] = React.useState(null);
   const [restSecs, setRestSecs] = React.useState(() => parseInt(localStorage.getItem('restSecs')) || 60);
 
   const voice = voiceGender === 'M' ? VOICE_BY_GENDER.M.id : VOICE_BY_GENDER.F.id;
@@ -1579,16 +1588,9 @@ function SetupScreen({ onStart, theme, error, starting }) {
 
   const sameLang = langA === langB;
 
-  async function pickVoice(gender) {
+  function pickVoice(gender) {
+    if (previewVoiceAbort) previewVoiceAbort();
     setVoiceGender(gender);
-    setVoiceErr(null);
-    setVoiceBusy(gender);
-    try {
-      await playVoiceSample(VOICE_BY_GENDER[gender].id, langA);
-    } catch (e) {
-      setVoiceErr(e.message);
-    }
-    setVoiceBusy(null);
   }
 
   return (
@@ -1638,19 +1640,18 @@ function SetupScreen({ onStart, theme, error, starting }) {
             textTransform: 'uppercase', letterSpacing: 0.8, marginTop: 14, marginBottom: 8, display: 'block',
           }}>Voz da tradução</label>
           <p style={{ fontSize: 12, color: theme.textSec, margin: '0 0 10px' }}>
-            Toque para ouvir e escolher
+            Toque para selecionar
           </p>
           {['F', 'M'].map(g => {
             const info = VOICE_BY_GENDER[g];
             const selected = voiceGender === g;
-            const busy = voiceBusy === g;
             return (
-              <button key={g} type="button" onClick={() => pickVoice(g)} disabled={!!voiceBusy} style={{
+              <button key={g} type="button" onClick={() => pickVoice(g)} style={{
                 width: '100%', padding: '16px 18px', marginBottom: 8, borderRadius: theme.radius,
                 background: selected ? theme.primary + '14' : theme.cardBg,
                 border: selected ? `2px solid ${theme.primary}` : (theme.cardBorder || `1px solid ${theme.divider}`),
-                cursor: voiceBusy ? 'wait' : 'pointer', display: 'flex', alignItems: 'center', gap: 12,
-                fontFamily: theme.font, outline: 'none', textAlign: 'left', opacity: voiceBusy && !busy ? 0.5 : 1,
+                cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12,
+                fontFamily: theme.font, outline: 'none', textAlign: 'left',
               }}>
                 <span style={{
                   width: 40, height: 40, borderRadius: '50%', flexShrink: 0,
@@ -1661,16 +1662,13 @@ function SetupScreen({ onStart, theme, error, starting }) {
                 <span style={{ flex: 1 }}>
                   <span style={{ display: 'block', fontSize: 17, fontWeight: 600, color: theme.text }}>{info.label}</span>
                   <span style={{ display: 'block', fontSize: 12, color: theme.textSec, marginTop: 2 }}>
-                    {busy ? 'Ouvindo amostra…' : 'Toque para ouvir'}
+                    {selected ? 'Selecionada' : 'Toque para selecionar'}
                   </span>
                 </span>
-                <span style={{ fontSize: 22 }}>{busy ? '…' : '🔊'}</span>
+                <span style={{ fontSize: 22 }}>{selected ? '✓' : ''}</span>
               </button>
             );
           })}
-          {voiceErr && (
-            <p style={{ fontSize: 12, color: theme.danger, margin: '4px 0 0' }}>{voiceErr}</p>
-          )}
         </>
       )}
 
@@ -1746,6 +1744,8 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
     setSearchLang(langId);
     setSearchLoading(true);
     setSearchHeard(query);
+    setSearchMode(false);
+    translatorRef.current.setSearchMode(false, null);
     try {
       const ans = await searchInternet(query, langId);
       translatorRef.current.addSearchResult?.(ans, langId);
@@ -1755,9 +1755,7 @@ function ActiveScreen({ config, theme, translator, onEnd }) {
       DEBUG_LOG('index.html:runSearch', 'Search fail', { error: e.message }, 'F');
     }
     setSearchLoading(false);
-    setSearchMode(false);
     setSearchHeard('');
-    translatorRef.current.setSearchMode(false, null);
   }, [config, searchLang, searchLoading]);
 
   runSearchRef.current = runSearch;
