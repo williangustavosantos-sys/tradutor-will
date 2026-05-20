@@ -63,11 +63,18 @@
 // ==========================================
 const APP_CONFIG = window.TRADUTOR_CONFIG || {};
 const GEMINI_MODEL = APP_CONFIG.GEMINI_MODEL || 'models/gemini-3.1-flash-live-preview';
+const GEMINI_MODEL_FALLBACKS = [
+  GEMINI_MODEL,
+  ...(Array.isArray(APP_CONFIG.GEMINI_MODEL_FALLBACKS) ? APP_CONFIG.GEMINI_MODEL_FALLBACKS : []),
+  'models/gemini-2.5-flash-native-audio-preview-12-2025',
+  'models/gemini-live-2.5-flash-preview',
+].filter((model, idx, arr) => model && arr.indexOf(model) === idx);
 const GEMINI_REST_MODEL = (APP_CONFIG.GEMINI_REST_MODEL || 'gemini-2.5-flash').replace(/^models\//, '');
 const MAX_TRANSLATIONS = 60; // evita crescimento infinito em sessões longas (~90 min)
 const MAX_SESSION_HISTORY = 140;
 const MAX_CONTEXT_ENTRIES = 18;
 const PLANNED_RECONNECT_MS = 8.5 * 60 * 1000; // Live API pode encerrar conexões longas; renovamos antes.
+const MIC_CHUNK_MS = 100;
 
 function geminiRestUrl(method) {
   return `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_REST_MODEL}:${method || 'generateContent'}`;
@@ -328,7 +335,7 @@ function parseSearchRequest(text, config, defaultLangId) {
     { re: /(?:^|[\s,.])(?:em\s+)?ingl[eê]s\s+(?:brit[aâ]nico|uk|gb)\s*[,:.\-]?\s*$/gi, base: 'en', variant: 'uk' },
     { re: /(?:^|[\s,.])(?:em\s+)?ingl[eê]s\s+(?:americano|us|usa)\s*[,:.\-]?\s*$/gi, base: 'en', variant: 'us' },
     { re: /(?:^|[\s,.])(?:in\s+)?(?:english|ingl[eê]s)\s*[,:.\-]?\s*$/gi, base: 'en' },
-    { re: /(?:^|[\s,.])(?:in\s+)?italiano\s*[,:.\-]?\s*$/gi, base: 'it' },
+    { re: /(?:^|[\s,.])(?:em\s+|in\s+)?italiano\s*[,:.\-]?\s*$/gi, base: 'it' },
     { re: /(?:^|[\s,.])(?:in\s+)?italian\s*[,:.\-]?\s*$/gi, base: 'it' },
     { re: /\b(responde|responda|responder)\s+em\s+(pt|portugu[eê]s)\b/gi, base: 'pt' },
     { re: /\b(respond|answer)\s+in\s+(en|english|ingl[eê]s)\b/gi, base: 'en' },
@@ -574,10 +581,7 @@ async function playVoiceSample(voiceName, langId) {
 
       if (msg.setupComplete !== undefined) {
         ws.send(JSON.stringify({
-          clientContent: {
-            turns: [{ role: 'user', parts: [{ text: phrase }] }],
-            turnComplete: true,
-          },
+          realtimeInput: { text: phrase },
         }));
         return;
       }
@@ -626,7 +630,10 @@ function useTranslator() {
   const inputCtxRef = React.useRef(null);
   const outputCtxRef = React.useRef(null);
   const micStreamRef = React.useRef(null);
+  const micSourceRef = React.useRef(null);
   const workletRef = React.useRef(null);
+  const scriptProcessorRef = React.useRef(null);
+  const micMonitorGainRef = React.useRef(null);
   const wakeLockRef = React.useRef(null);
   const nextPlayTimeRef = React.useRef(0);
   const reconnectRef = React.useRef(0);
@@ -650,6 +657,8 @@ function useTranslator() {
   const searchModeRef = React.useRef(false);
   const searchOnUtteranceRef = React.useRef(null);
   const searchUtteranceBufRef = React.useRef('');
+  const inputSampleRateRef = React.useRef(16000);
+  const liveModelRef = React.useRef(GEMINI_MODEL_FALLBACKS[0]);
 
   React.useEffect(() => { pausedRef.current = paused; }, [paused]);
   React.useEffect(() => { audioOnRef.current = audioOn; }, [audioOn]);
@@ -899,12 +908,12 @@ function useTranslator() {
     clearTimeout(playEndTimeoutRef.current);
   }
 
-  function sendSetup() {
+  function sendSetup(modelName) {
     const cfg = configRef.current;
     const context = recentContextText();
     wsRef.current.send(JSON.stringify({
       setup: {
-        model: GEMINI_MODEL,
+        model: modelName || liveModelRef.current,
         generationConfig: {
           responseModalities: ['AUDIO'],
           speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: cfg.voice || 'Aoede' } } },
@@ -913,6 +922,7 @@ function useTranslator() {
         systemInstruction: { parts: [{ text: buildSystemPrompt(cfg.langA, cfg.langB, context) }] },
         outputAudioTranscription: {},
         inputAudioTranscription: {},
+        contextWindowCompression: { slidingWindow: {} },
         realtimeInputConfig: {
           automaticActivityDetection: {},
         },
@@ -975,7 +985,7 @@ function useTranslator() {
     }
   }
 
-  function connectWebSocket(apiKey) {
+  function connectWebSocketWithModel(apiKey, modelName) {
     return new Promise((resolve, reject) => {
       let settled = false;
       const timeout = setTimeout(() => {
@@ -988,7 +998,8 @@ function useTranslator() {
       const ws = new WebSocket(url);
       wsRef.current = ws;
       manualSocketCloseRef.current = false;
-      ws.onopen = () => sendSetup();
+      liveModelRef.current = modelName;
+      ws.onopen = () => sendSetup(modelName);
       ws.onmessage = async (e) => {
         const t = e.data instanceof Blob ? await e.data.text() : e.data;
         handleServerMessage(t, ok, fail);
@@ -1013,6 +1024,29 @@ function useTranslator() {
         }
       };
     });
+  }
+
+  async function connectWebSocket(apiKey) {
+    let lastError = null;
+    for (const modelName of GEMINI_MODEL_FALLBACKS) {
+      try {
+        await connectWebSocketWithModel(apiKey, modelName);
+        liveModelRef.current = modelName;
+        return;
+      } catch (e) {
+        lastError = e;
+        if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
+          try {
+            wsRef.current.onclose = null;
+            wsRef.current.close();
+          } catch (_) {}
+        }
+        const message = (e?.message || '').toLowerCase();
+        const shouldTryNext = /model|not found|not_found|unsupported|invalid argument|deprecated|unavailable/.test(message);
+        if (!shouldTryNext) break;
+      }
+    }
+    throw lastError || new Error('Não foi possível conectar à Live API.');
   }
 
   function clearReconnectTimers() {
@@ -1090,12 +1124,16 @@ function useTranslator() {
   }
 
   async function initAudio() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('Microfone indisponível neste navegador. Abra no Safari/Chrome com HTTPS.');
+    }
+
     inputCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     outputCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
     await resumeAudioContexts();
+    inputSampleRateRef.current = Math.round(inputCtxRef.current.sampleRate || 16000);
     nextPlayTimeRef.current = outputCtxRef.current.currentTime;
 
-    await inputCtxRef.current.audioWorklet.addModule('mic-worklet.js');
     micStreamRef.current = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
@@ -1105,19 +1143,63 @@ function useTranslator() {
       }
     });
 
-    const source = inputCtxRef.current.createMediaStreamSource(micStreamRef.current);
-    workletRef.current = new AudioWorkletNode(inputCtxRef.current, 'mic-processor');
-    workletRef.current.port.onmessage = (e) => {
+    const sendMicPcm = (buffer) => {
       if (pausedRef.current || !micOnRef.current) return;
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-      const b64 = arrayBufferToBase64(e.data);
+      const b64 = arrayBufferToBase64(buffer);
       wsRef.current.send(JSON.stringify({
         realtimeInput: {
-          audio: { mimeType: 'audio/pcm;rate=16000', data: b64 }
+          audio: { mimeType: `audio/pcm;rate=${inputSampleRateRef.current}`, data: b64 }
         }
       }));
     };
-    source.connect(workletRef.current);
+
+    const source = inputCtxRef.current.createMediaStreamSource(micStreamRef.current);
+    micSourceRef.current = source;
+    micMonitorGainRef.current = inputCtxRef.current.createGain();
+    micMonitorGainRef.current.gain.value = 0;
+    micMonitorGainRef.current.connect(inputCtxRef.current.destination);
+
+    if (inputCtxRef.current.audioWorklet && window.AudioWorkletNode) {
+      try {
+        await inputCtxRef.current.audioWorklet.addModule('mic-worklet.js');
+        workletRef.current = new AudioWorkletNode(inputCtxRef.current, 'mic-processor');
+        workletRef.current.port.onmessage = (e) => sendMicPcm(e.data);
+        source.connect(workletRef.current);
+        workletRef.current.connect(micMonitorGainRef.current);
+        return;
+      } catch (e) {
+        DEBUG_LOG('index.html:initAudio', 'AudioWorklet failed; using ScriptProcessor fallback', { error: e.message }, 'MIC');
+      }
+    }
+
+    let fallbackBuffer = [];
+    let fallbackSamples = 0;
+    const chunkSize = Math.max(1, Math.round(inputSampleRateRef.current * MIC_CHUNK_MS / 1000));
+    scriptProcessorRef.current = inputCtxRef.current.createScriptProcessor(4096, 1, 1);
+    scriptProcessorRef.current.onaudioprocess = (event) => {
+      const channel = event.inputBuffer.getChannelData(0);
+      fallbackBuffer.push(new Float32Array(channel));
+      fallbackSamples += channel.length;
+      while (fallbackSamples >= chunkSize) {
+        const pcm = new Int16Array(chunkSize);
+        let out = 0;
+        while (out < chunkSize && fallbackBuffer.length) {
+          const first = fallbackBuffer[0];
+          const take = Math.min(first.length, chunkSize - out);
+          for (let i = 0; i < take; i++) {
+            const s = Math.max(-1, Math.min(1, first[i]));
+            pcm[out++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+          if (take === first.length) fallbackBuffer.shift();
+          else fallbackBuffer[0] = first.subarray(take);
+          fallbackSamples -= take;
+        }
+        sendMicPcm(pcm.buffer);
+      }
+    };
+    source.connect(scriptProcessorRef.current);
+    scriptProcessorRef.current.connect(micMonitorGainRef.current);
   }
 
   async function requestWakeLock() {
@@ -1176,7 +1258,7 @@ function useTranslator() {
       startTimer();
       await requestWakeLock();
       // #region agent log
-      DEBUG_LOG('index.html:start', 'Session started', { langA: config.langA, langB: config.langB, model: GEMINI_MODEL }, 'C');
+      DEBUG_LOG('index.html:start', 'Session started', { langA: config.langA, langB: config.langB, model: liveModelRef.current }, 'C');
       // #endregion
       return true;
     } catch (e) {
@@ -1196,6 +1278,13 @@ function useTranslator() {
     clearReconnectTimers();
     if (wsRef.current) { try { wsRef.current.close(); } catch(e){} wsRef.current = null; }
     if (workletRef.current) { workletRef.current.disconnect(); workletRef.current = null; }
+    if (scriptProcessorRef.current) {
+      scriptProcessorRef.current.onaudioprocess = null;
+      scriptProcessorRef.current.disconnect();
+      scriptProcessorRef.current = null;
+    }
+    if (micSourceRef.current) { micSourceRef.current.disconnect(); micSourceRef.current = null; }
+    if (micMonitorGainRef.current) { micMonitorGainRef.current.disconnect(); micMonitorGainRef.current = null; }
     if (micStreamRef.current) { micStreamRef.current.getTracks().forEach(t => t.stop()); micStreamRef.current = null; }
     if (inputCtxRef.current) { inputCtxRef.current.close(); inputCtxRef.current = null; }
     if (outputCtxRef.current) { outputCtxRef.current.close(); outputCtxRef.current = null; }
@@ -1204,10 +1293,19 @@ function useTranslator() {
     reconnectRef.current = 0;
   }
 
-  function pause() { setPaused(true); }
+  function pause() {
+    sendAudioStreamEnd();
+    setPaused(true);
+  }
   function resume() {
     setPaused(false);
     resumeAudioContexts();
+  }
+  function sendAudioStreamEnd() {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    try {
+      wsRef.current.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+    } catch (_) {}
   }
   function toggleAudio() {
     setAudioOn(v => {
@@ -1220,6 +1318,7 @@ function useTranslator() {
   async function toggleMic() {
     setMicOn(v => {
       const next = !v;
+      if (!next) sendAudioStreamEnd();
       if (next) resumeAudioContexts();
       return next;
     });
@@ -1236,10 +1335,7 @@ function useTranslator() {
     beginNewTurn();
     appendInputTranscription(t, { skipBeginTurn: true });
     wsRef.current.send(JSON.stringify({
-      clientContent: {
-        turns: [{ role: 'user', parts: [{ text: t }] }],
-        turnComplete: true,
-      },
+      realtimeInput: { text: t },
     }));
   }
 

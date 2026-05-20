@@ -4,8 +4,9 @@
 class MicProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    // 16000 Hz * 0.1 s = 1600 amostras por chunk (~100ms)
-    this.chunkSize = 1600;
+    // Envia chunks de ~100ms usando o sample rate real do AudioContext.
+    // No iOS/Safari, pedir 16000 Hz pode resultar em 44100/48000 Hz.
+    this.chunkSize = Math.max(1, Math.round(sampleRate / 10));
     this.buffer = new Int16Array(this.chunkSize);
     this.bufferIndex = 0;
   }

@@ -21,6 +21,10 @@ window.TRADUTOR_CONFIG = {
   DEFAULT_ENGLISH_VARIANT: 'us',
   // Tradutor ao vivo (WebSocket)
   GEMINI_MODEL: 'models/gemini-3.1-flash-live-preview',
+  GEMINI_MODEL_FALLBACKS: [
+    'models/gemini-2.5-flash-native-audio-preview-12-2025',
+    'models/gemini-live-2.5-flash-preview',
+  ],
   // Pesquisa na internet (REST generateContent — só texto)
   GEMINI_REST_MODEL: 'gemini-2.5-flash',
 };

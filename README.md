@@ -80,6 +80,10 @@ Pela tabela atual da Gemini Live API (Google AI Studio):
 
 **"Erro ao iniciar"** — verifique se a API key está correta e ativa. Teste em [https://aistudio.google.com](https://aistudio.google.com).
 
+**Microfone não capta voz** — abra o app por uma URL **HTTPS** no Safari/Chrome e permita o microfone. Em iPhone, o navegador pode capturar em 44.1/48 kHz mesmo quando o app pede 16 kHz; o app envia o sample rate real para a Gemini e mantém um fallback de captura caso o AudioWorklet falhe.
+
+**Sessão de 1 hora** — a Live API pode encerrar conexões por volta de 10–15 minutos. O app renova a conexão preventivamente a cada ~8,5 minutos, reaplica o contexto recente e tenta modelos fallback se o modelo principal estiver indisponível.
+
 **Áudio cortado / lento** — provavelmente Wi-Fi ruim ou rede móvel fraca. Tente trocar de rede.
 
 **Aluno não ouviu uma frase curta** — interjeições muito curtas ("hm", "ok") são propositalmente ignoradas. Fale a frase completa.
