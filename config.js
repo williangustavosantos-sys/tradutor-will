@@ -16,7 +16,10 @@
 // ============================================================
 
 window.TRADUTOR_CONFIG = {
-  DEFAULT_API_KEY: 'AIzaSyDt28vDm1vO30JBniOAhwgKWFtsuArtxI0',
+  // A key NÃO fica mais aqui. O app agora pede pra colar na tela inicial
+  // e guarda em localStorage, só neste aparelho. Nunca cole uma key real
+  // neste arquivo se o repositório for público.
+  DEFAULT_API_KEY: '',
   DEFAULT_LANGUAGE_PAIR: 'pt-en',
   DEFAULT_ENGLISH_VARIANT: 'us',
   // Tradutor ao vivo (WebSocket)
