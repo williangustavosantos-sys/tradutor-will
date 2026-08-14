@@ -1,0 +1,2246 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+  <meta name="theme-color" content="#F2F2F7" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="Tradutor Will" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="logo.png" />
+  <title>Tradutor Will</title>
+
+  <script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js"></script>
+
+  <script src="config.js"></script>
+
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      overscroll-behavior: none;
+      background: #F2F2F7;
+      font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+    }
+
+    #root { height: 100%; display: flex; flex-direction: column; }
+
+    button { font-family: inherit; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+
+    @keyframes slideUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+// ==========================================
+// CONFIG (carregado de config.js)
+// ==========================================
+const APP_CONFIG = window.TRADUTOR_CONFIG || {};
+const GEMINI_MODEL = APP_CONFIG.GEMINI_MODEL || 'models/gemini-3.1-flash-live-preview';
+const GEMINI_MODEL_FALLBACKS = [
+  GEMINI_MODEL,
+  ...(Array.isArray(APP_CONFIG.GEMINI_MODEL_FALLBACKS) ? APP_CONFIG.GEMINI_MODEL_FALLBACKS : []),
+  'models/gemini-2.5-flash-native-audio-preview-12-2025',
+  'models/gemini-live-2.5-flash-preview',
+].filter((model, idx, arr) => model && arr.indexOf(model) === idx);
+const GEMINI_REST_MODEL = (APP_CONFIG.GEMINI_REST_MODEL || 'gemini-2.5-flash').replace(/^models\//, '');
+const MAX_TRANSLATIONS = 60; // evita crescimento infinito em sessões longas (~90 min)
+const MAX_SESSION_HISTORY = 140;
+const MAX_CONTEXT_ENTRIES = 18;
+const PLANNED_RECONNECT_MS = 8.5 * 60 * 1000; // Live API pode encerrar conexões longas; renovamos antes.
+const MIC_CHUNK_MS = 100;
+
+function geminiRestUrl(method) {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_REST_MODEL}:${method || 'generateContent'}`;
+}
+
+// #region agent log
+const DEBUG_LOG = (location, message, data, hypothesisId) => {
+  if (!APP_CONFIG.DEBUG_LOG_ENDPOINT) return;
+  fetch(APP_CONFIG.DEBUG_LOG_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '5a4655' },
+    body: JSON.stringify({ sessionId: '5a4655', location, message, data, timestamp: Date.now(), hypothesisId }),
+  }).catch(() => {});
+};
+// #endregion
+
+const VOICE_BY_GENDER = {
+  F: { id: 'Aoede', label: 'Voz feminina' },
+  M: { id: 'Charon', label: 'Voz masculina' },
+};
+
+const VOICE_SAMPLE_PHRASE = {
+  pt: 'Olá! Esta é a voz que vai traduzir para você.',
+  en: 'Hello! This is the voice that will translate for you.',
+  it: 'Ciao! Questa è la voce che tradurrà per te.',
+};
+
+// ==========================================
+// LANGUAGES
+// ==========================================
+const LANGUAGES = [
+  { id: 'pt-BR', label: 'Português',   short: 'PT', flag: '🇧🇷', color: '#2563EB', base: 'pt' },
+  { id: 'en-US', label: 'English (US)', short: 'EN', flag: '🇺🇸', color: '#DC2626', base: 'en' },
+  { id: 'en-GB', label: 'English (UK)', short: 'EN', flag: '🇬🇧', color: '#7C3AED', base: 'en' },
+  { id: 'it',    label: 'Italiano',     short: 'IT', flag: '🇮🇹', color: '#059669', base: 'it' },
+];
+
+const langById = (id) => LANGUAGES.find(l => l.id === id);
+
+// ==========================================
+// SYSTEM PROMPT BUILDER
+// ==========================================
+const PROMPT_PT_EN = `Você é um intérprete invisível em uma sessão de personal trainer entre dois falantes:
+- TREINADOR: fala português brasileiro (PT-BR)
+- ALUNO: fala inglês (EN)
+
+REGRAS ABSOLUTAS:
+1. Você NUNCA conversa. NUNCA responde como se a fala fosse dirigida a você.
+2. Sua ÚNICA função é traduzir o que cada um diz para o idioma do outro.
+3. Quando ouvir PORTUGUÊS → fale a tradução em INGLÊS natural.
+4. Quando ouvir INGLÊS → fale a tradução em PORTUGUÊS BRASILEIRO natural.
+5. Traduza pelo SENTIDO e CONTEXTO, nunca palavra por palavra.
+6. Mantenha consistência de terminologia ao longo de toda a sessão.
+7. NÃO traduza interjeições isoladas curtas ("uhum", "ok", "yeah", "hm"). Ignore-as.
+8. NÃO traduza ruídos, música, vozes distantes ou conversas que claramente não são entre os dois.
+9. Se a frase for longa, ESPERE a pausa natural antes de traduzir.
+10. Não explique, não comente, não pergunte. Apenas traduza.
+
+GLOSSÁRIO TÉCNICO — TREINAMENTO FUNCIONAL E BIOMECÂNICA:
+PT→EN:
+- "trava/ativa o core" → "brace your core"
+- "cadência" → "tempo" / "cadence"
+- "falha concêntrica" → "concentric failure"
+- "ponto morto" → "sticking point"
+- "amplitude" → "range of motion" (ROM)
+- "agachamento" → "squat"
+- "terra/levantamento terra" → "deadlift"
+- "supino" → "bench press"
+- "remada" → "row"
+- "desenvolvimento" → "overhead press"
+- "respira/expira na subida" → "breathe / exhale on the way up"
+- "contrai/aperta" → "squeeze"
+- "neutro/coluna neutra" → "neutral spine"
+- "ombros pra trás" → "shoulders back"
+- "abre o peito" → "open up your chest"
+- "joelho alinhado" → "knee tracking"
+- "quadril pra trás" → "push your hips back"
+- "explosivo/controlado" → "explosive / controlled"
+- "negativa/excêntrica/concêntrica" → "negative/eccentric/concentric"
+- "isso aí/isso mesmo" → "that's it / perfect"
+- "vamo lá/bora" → "let's go / come on"
+- "mais uma/última" → "one more / last one"
+- "aguenta/segura" → "hold it"
+- "carga/série/repetição/descanso" → "load / set / rep / rest"
+- "aquecimento/alongamento/mobilidade" → "warm-up / stretching / mobility"
+
+EN→PT:
+- "I'm tired" → "Estou cansado"
+- "it hurts/sharp pain/burning" → "está doendo / dor aguda / queimação"
+- "I can't" → "não consigo"
+- "let me rest" → "deixa eu descansar"
+
+Quando o falante usar gírias, adapte ao equivalente cultural — não traduza ao pé da letra.
+Em caso de dúvida, traduza pela intenção mais provável em contexto de treino físico.`;
+
+const PROMPT_PT_IT = `Você é um intérprete invisível entre dois falantes:
+- Falante A: português brasileiro (PT-BR)
+- Falante B: italiano (IT)
+
+REGRAS ABSOLUTAS:
+1. Você NUNCA conversa. NUNCA responde como se a fala fosse dirigida a você.
+2. Sua ÚNICA função é traduzir o que cada um diz para o idioma do outro.
+3. Quando ouvir PORTUGUÊS → fale a tradução em ITALIANO natural.
+4. Quando ouvir ITALIANO → fale a tradução em PORTUGUÊS BRASILEIRO natural.
+5. Traduza pelo SENTIDO e CONTEXTO, nunca palavra por palavra.
+6. NÃO traduza interjeições curtas ("uhum", "ok", "sì", "hm"). Ignore-as.
+7. Espere pausas naturais antes de traduzir frases longas.
+8. Não explique, não comente, não pergunte. Apenas traduza.
+
+GLOSSÁRIO TÉCNICO PT↔IT (quando aparecer):
+- "core" → "core" / "trava o core" → "stringi il core"
+- "agachamento" → "accosciata" / "squat"
+- "supino" → "panca piana"
+- "terra" → "stacco da terra"
+- "remada" → "rematore"
+- "respira / expira na subida" → "respira / espira mentre sali"
+- "contrai" → "stringi"
+- "neutro" → "schiena neutra"
+- "ombros pra trás" → "spalle indietro"
+- "joelho alinhado" → "ginocchio in linea"
+- "explosivo / controlado" → "esplosivo / controllato"
+- "isso / isso mesmo" → "così / esatto"
+- "vamo / bora" → "dai / andiamo"
+- "mais uma / última" → "ancora una / ultima"
+- "carga / série / repetição / descanso" → "carico / serie / ripetizione / riposo"
+- "aquecimento / alongamento" → "riscaldamento / stretching"
+
+EXPRESSÕES COMUNS:
+- "tudo bem?" → "tutto bene?"
+- "obrigado" → "grazie" / "por favor" → "per favore"
+- "estou cansado" → "sono stanco" / "está doendo" → "fa male"
+- "fala mais devagar" → "parla più lentamente"
+
+Em caso de dúvida, traduza pela intenção mais provável.`;
+
+const PROMPT_EN_IT = `You are an invisible interpreter between two speakers:
+- Speaker A: English (EN)
+- Speaker B: Italian (IT)
+
+ABSOLUTE RULES:
+1. You NEVER converse. You NEVER respond as if speech were addressed to you.
+2. Your ONLY function is to translate what each one says into the other's language.
+3. When you hear ENGLISH → speak the translation in natural ITALIAN.
+4. When you hear ITALIAN → speak the translation in natural ENGLISH.
+5. Translate by MEANING and CONTEXT, never word by word.
+6. Do not translate short isolated interjections ("uh-huh", "ok", "sì", "hm").
+7. Wait for natural pauses before translating long sentences.
+8. Do not explain, comment, or ask. Just translate.
+
+FITNESS / TRAINING TERMS:
+- "brace your core" → "stringi il core"
+- "squat" → "accosciata / squat"
+- "bench press" → "panca piana"
+- "deadlift" → "stacco da terra"
+- "breathe / exhale on the way up" → "respira / espira mentre sali"
+- "squeeze" → "stringi"
+- "shoulders back / open up your chest" → "spalle indietro / apri il petto"
+- "explosive / controlled" → "esplosivo / controllato"
+- "one more rep / last one" → "ancora una ripetizione / ultima"
+- "let's go / come on" → "dai / andiamo"
+- "set / rep / rest" → "serie / ripetizione / riposo"
+
+COMMON EXPRESSIONS:
+- "how are you?" → "come stai? / tutto bene?"
+- "thank you / please" → "grazie / per favore"
+- "I'm tired / it hurts" → "sono stanco / fa male"
+- "I don't understand / speak slower" → "non ho capito / parla più lentamente"
+
+Translate by the most likely intention in context.`;
+
+function variantSuffix(variant) {
+  return variant === 'uk'
+    ? `\n\n=== VARIANTE DE INGLÊS: BRITÂNICO (EN-GB) ===\n` +
+      `- Use SOTAQUE britânico (RP / Estuário, NÃO americano)\n` +
+      `- Vocabulário britânico: "trainers" (não "sneakers"), "lift" (não "elevator"), ` +
+      `"brilliant"/"lovely"/"cheers", "mate", "press-up", "well done"/"spot on"\n` +
+      `- Ortografia britânica: "colour", "centre", "realise", "favourite"`
+    : `\n\n=== VARIANTE DE INGLÊS: AMERICANO (EN-US) ===\n` +
+      `- Use SOTAQUE americano (General American)\n` +
+      `- Vocabulário americano: "sneakers", "elevator", "awesome"/"great", ` +
+      `"buddy"/"dude", "push-up", "you got it"\n` +
+      `- Ortografia americana: "color", "center", "realize", "favorite"`;
+}
+
+function buildSystemPrompt(langAId, langBId, recentContext) {
+  const a = langById(langAId), b = langById(langBId);
+  if (!a || !b) return PROMPT_PT_EN;
+
+  const bases = new Set([a.base, b.base]);
+  let base;
+  if (bases.has('pt') && bases.has('en')) base = PROMPT_PT_EN;
+  else if (bases.has('pt') && bases.has('it')) base = PROMPT_PT_IT;
+  else if (bases.has('en') && bases.has('it')) base = PROMPT_EN_IT;
+  else base = PROMPT_PT_EN;
+
+  // Variante de inglês quando aplicável
+  const enLang = [a, b].find(l => l.base === 'en');
+  if (enLang) {
+    const variant = enLang.id === 'en-GB' ? 'uk' : 'us';
+    base = base + variantSuffix(variant);
+  }
+
+  base += `\n\nREGRAS DE CONTEXTO DA SESSÃO:
+- Traduza a intenção completa do falante, não palavras isoladas.
+- Use o contexto recente para resolver pronomes, exercícios, cargas, séries, repetições, dor, lado do corpo e correções de técnica.
+- Se uma fala curta depender da anterior ("mais duas", "assim?", "aqui dói"), traduza mantendo esse sentido operacional.
+- Não invente dados que não foram ditos. Se faltar informação, preserve a ambiguidade sem explicar.
+- Após reconexão, continue como se fosse a mesma sessão; não cumprimente, não anuncie retomada e não comente sobre conexão.`;
+
+  if (recentContext) {
+    base += `\n\nCONTEXTO RECENTE VALIDADO DA SESSÃO:
+${recentContext}
+
+Use este contexto apenas para manter continuidade semântica. Não repita o histórico.`;
+  }
+
+  return base;
+}
+
+// Extrai idioma da resposta e limpa a pergunta (ex.: "... responde em inglês")
+function parseSearchRequest(text, config, defaultLangId) {
+  let query = (text || '').trim();
+  let langId = defaultLangId || config.langA;
+
+  const pickByBase = (base, variant) => {
+    const ids = [config.langA, config.langB];
+    if (base === 'en' && variant === 'uk') {
+      const inSessionUk = ids.find(id => id === 'en-GB');
+      return inSessionUk || 'en-GB';
+    }
+    if (base === 'en' && variant === 'us') {
+      const inSessionUs = ids.find(id => id === 'en-US');
+      return inSessionUs || 'en-US';
+    }
+    const inSession = ids.find(id => langById(id)?.base === base);
+    if (inSession) return inSession;
+    if (base === 'pt') return 'pt-BR';
+    if (base === 'en') return ids.find(id => langById(id)?.base === 'en') || 'en-US';
+    if (base === 'it') return 'it';
+    return defaultLangId || config.langA;
+  };
+
+  const rules = [
+    { re: /(?:^|[\s,.])(?:responde|responda|responder|fala|falar|diz|diga|em)\s+(?:em\s+)?portugu[eê]s(?:\s+brasileiro)?\s*[,:.\-]?\s*/gi, base: 'pt' },
+    { re: /(?:^|[\s,.])(?:responde|responda|responder|fala|falar|diz|diga)\s+(?:em\s+)?(?:ingl[eê]s|english)\s+(?:brit[aâ]nico|uk|gb|british)\s*[,:.\-]?\s*/gi, base: 'en', variant: 'uk' },
+    { re: /(?:^|[\s,.])(?:responde|responda|responder|fala|falar|diz|diga)\s+(?:em\s+)?(?:ingl[eê]s|english)\s+(?:americano|us|usa|american)\s*[,:.\-]?\s*/gi, base: 'en', variant: 'us' },
+    { re: /(?:^|[\s,.])(?:responde|responda|responder|fala|falar|diz|diga)\s+(?:em\s+)?(?:english|ingl[eê]s)\s*[,:.\-]?\s*/gi, base: 'en' },
+    { re: /(?:^|[\s,.])(?:responde|responda|responder|fala|falar|diz|diga)\s+(?:em\s+)?italiano\s*[,:.\-]?\s*/gi, base: 'it' },
+    { re: /(?:^|[\s,.])(?:respond|answer|speak|say)\s+(?:in\s+)?(?:british\s+english|english\s+uk|uk\s+english)\s*[,:.\-]?\s*/gi, base: 'en', variant: 'uk' },
+    { re: /(?:^|[\s,.])(?:respond|answer|speak|say)\s+(?:in\s+)?(?:american\s+english|english\s+us|us\s+english)\s*[,:.\-]?\s*/gi, base: 'en', variant: 'us' },
+    { re: /(?:^|[\s,.])(?:respond|answer|speak|say)\s+(?:in\s+)?(?:english|ingl[eê]s)\s*[,:.\-]?\s*/gi, base: 'en' },
+    { re: /(?:^|[\s,.])(?:respond|answer|speak|say)\s+(?:in\s+)?(?:portuguese|portugu[eê]s)\s*[,:.\-]?\s*/gi, base: 'pt' },
+    { re: /(?:^|[\s,.])(?:respond|answer|speak|say)\s+(?:in\s+)?italian\s*[,:.\-]?\s*/gi, base: 'it' },
+    { re: /(?:^|[\s,.])(?:rispondi|rispondere|parla|dimmi)\s+(?:in\s+)?(?:portoghese|portuguese|portugu[eê]s)\s*[,:.\-]?\s*/gi, base: 'pt' },
+    { re: /(?:^|[\s,.])(?:rispondi|rispondere|parla|dimmi)\s+(?:in\s+)?(?:inglese|english)\s*[,:.\-]?\s*/gi, base: 'en' },
+    { re: /(?:^|[\s,.])(?:rispondi|rispondere|parla|dimmi|in)\s+(?:in\s+)?italiano\s*[,:.\-]?\s*/gi, base: 'it' },
+    { re: /(?:^|[\s,.])(?:em\s+)?portugu[eê]s\s*[,:.\-]?\s*$/gi, base: 'pt' },
+    { re: /(?:^|[\s,.])(?:em\s+)?ingl[eê]s\s+(?:brit[aâ]nico|uk|gb)\s*[,:.\-]?\s*$/gi, base: 'en', variant: 'uk' },
+    { re: /(?:^|[\s,.])(?:em\s+)?ingl[eê]s\s+(?:americano|us|usa)\s*[,:.\-]?\s*$/gi, base: 'en', variant: 'us' },
+    { re: /(?:^|[\s,.])(?:in\s+)?(?:english|ingl[eê]s)\s*[,:.\-]?\s*$/gi, base: 'en' },
+    { re: /(?:^|[\s,.])(?:em\s+|in\s+)?italiano\s*[,:.\-]?\s*$/gi, base: 'it' },
+    { re: /(?:^|[\s,.])(?:in\s+)?italian\s*[,:.\-]?\s*$/gi, base: 'it' },
+    { re: /\b(responde|responda|responder)\s+em\s+(pt|portugu[eê]s)\b/gi, base: 'pt' },
+    { re: /\b(respond|answer)\s+in\s+(en|english|ingl[eê]s)\b/gi, base: 'en' },
+    { re: /\b(rispondi|rispondere)\s+in\s+(it|italiano)\b/gi, base: 'it' },
+  ];
+
+  for (const { re, base, variant } of rules) {
+    if (re.test(query)) {
+      langId = pickByBase(base, variant);
+      query = query.replace(re, ' ').replace(/\s+/g, ' ').trim();
+      re.lastIndex = 0;
+    }
+  }
+
+  if (!query) query = (text || '').trim();
+  return { query, langId };
+}
+
+function cleanSearchAnswer(raw) {
+  const text = (raw || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text) return '';
+  const firstSentence = text.match(/^.+?[.!?](?=\s|$)/)?.[0] || text;
+  return firstSentence.trim();
+}
+
+// Pesquisa na internet (API REST separada — não interfere no tradutor ao vivo)
+async function searchInternet(query, langId) {
+  const lang = langById(langId);
+  const answerLanguage = lang?.id === 'pt-BR'
+    ? 'Português brasileiro'
+    : lang?.id === 'it'
+      ? 'Italiano'
+      : lang?.id === 'en-GB'
+        ? 'English (UK)'
+        : 'English (US)';
+  const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
+  if (!apiKey) throw new Error('Falta a API key (config.js).');
+  const res = await fetch(
+    `${geminiRestUrl('generateContent')}?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          role: 'user',
+          parts: [{
+            text:
+              `Pergunta: ${query.trim()}\n` +
+              `Idioma obrigatório da resposta: ${answerLanguage}.\n` +
+              `Responda somente nesse idioma.`
+          }],
+        }],
+        tools: [{ googleSearch: {} }],
+        generationConfig: {
+          temperature: 0,
+          maxOutputTokens: 120,
+        },
+        systemInstruction: {
+          parts: [{ text: `Você devolve respostas factuais para aparecerem como legenda de tradução. Responda obrigatoriamente em ${answerLanguage}. Use uma frase curta, sem introdução, sem explicação, sem lista e sem repetir a resposta.` }],
+        },
+      }),
+    }
+  );
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || 'Erro na pesquisa');
+  const parts = data.candidates?.[0]?.content?.parts || [];
+  const text = parts
+    .map(p => p.text)
+    .filter(Boolean)
+    .join('\n')
+    .split('\n')
+    .map(line => line.trim())
+    .filter((line, idx, arr) => line && arr.indexOf(line) === idx)
+    .join(' ');
+  const cleaned = cleanSearchAnswer(text);
+  if (cleaned) return cleaned;
+  if (langId === 'it') return 'Non ho trovato la risposta.';
+  if (langId === 'en-US' || langId === 'en-GB') return 'I could not find the answer.';
+  return 'Não encontrei resposta.';
+}
+
+function searchErrorText(langId) {
+  if (langId === 'it') return 'Errore nella ricerca.';
+  if (langId === 'en-US' || langId === 'en-GB') return 'Search error.';
+  return 'Erro na pesquisa.';
+}
+
+// ==========================================
+// LANGUAGE DETECTION (pra rotear traduções pra metade certa)
+// ==========================================
+function detectBase(text) {
+  if (!text) return null;
+  const t = text.toLowerCase();
+  if (/[ãõçâê]/.test(t)) return 'pt';
+  if (/[ìòù]/.test(t) && !/[ãõ]/.test(t)) return 'it';
+  if (/\b(oi|tudo|obrigado|obrigada|bom|boa|sim|não|tá|né|então|vamos|pra|pro|fala|olá)\b/.test(t)) return 'pt';
+  if (/\b(hi|hello|hey|yeah|yes|nope|thanks|sorry|please|sure|right|well|alright|nice|cool)\b/.test(t)) return 'en';
+  if (/\b(ciao|buon|buona|grazie|prego|scusa|bravo|brava|dai|perfetto)\b/.test(t)) return 'it';
+  if (/\b(você|isso|estou|aqui|aí|treino|força|agachamento|série|carga|respira)\b/.test(t)) return 'pt';
+  if (/\b(non|molto|bene|allora|sono|sei|sì|adesso|forza)\b/.test(t)) return 'it';
+  if (/\b(the|you|your|good|okay|great|breathe|squeeze|let's|one|more|rep|set|how|are|doing)\b/.test(t)) return 'en';
+  if (/\b(é|um|uma|esse|essa|este|esta|para|com|mas|mais|também)\b/.test(t)) return 'pt';
+  return null;
+}
+
+// ==========================================
+// THEMES
+// ==========================================
+function getAppTheme(style) {
+  const base = {
+    text: '#1C1C1E', textSec: '#8E8E93', textTer: '#AEAEB2',
+    divider: '#E5E5EA', primary: '#007AFF', danger: '#FF3B30',
+    success: '#34C759', radius: 14,
+    font: "-apple-system, 'SF Pro Text', system-ui, sans-serif",
+  };
+  if (style === 'minimal') return {
+    ...base, bg: '#FFFFFF', cardBg: '#FFFFFF',
+    cardBorder: '1px solid #E5E5EA', cardShadow: 'none',
+    halfBg: () => '#FFFFFF',
+    selBg: () => '#F2F2F7', selBorder: (c) => `2px solid ${c}`,
+    radius: 10,
+  };
+  if (style === 'vivid') return {
+    ...base, bg: '#FAFAFA', cardBg: '#FFFFFF',
+    cardBorder: 'none', cardShadow: '0 2px 8px rgba(0,0,0,0.06)',
+    halfBg: (c) => `${c}08`,
+    selBg: (c) => `${c}14`, selBorder: (c) => `2px solid ${c}`,
+    radius: 16,
+  };
+  return { // soft (default)
+    ...base, bg: '#F2F2F7', cardBg: '#FFFFFF',
+    cardBorder: 'none', cardShadow: '0 1px 3px rgba(0,0,0,0.05)',
+    halfBg: () => '#FFFFFF',
+    selBg: (c) => `${c}12`, selBorder: (c) => `2px solid ${c}`,
+    radius: 14,
+  };
+}
+
+// ==========================================
+// AUDIO UTILS
+// ==========================================
+function base64ToArrayBuffer(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let s = '', chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(s);
+}
+function int16ToFloat32(int16) {
+  const f = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) f[i] = int16[i] / 0x8000;
+  return f;
+}
+
+let previewAudioCtx = null;
+let previewVoiceAbort = null;
+
+// Áudio curto usa Live API separada para não interferir no WebSocket do tradutor.
+async function playLiveSpeech(voiceName, langId, text, timeoutMs) {
+  if (previewVoiceAbort) previewVoiceAbort();
+
+  const lang = langById(langId);
+  const phrase = text || VOICE_SAMPLE_PHRASE[lang?.base || 'pt'] || VOICE_SAMPLE_PHRASE.pt;
+  const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
+  if (!apiKey) throw new Error('Falta a API key (config.js).');
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let ws = null;
+    let nextPlay = 0;
+    let heardAudio = false;
+
+    const done = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      previewVoiceAbort = null;
+      if (ws) { try { ws.close(); } catch (_) {} ws = null; }
+      if (err) reject(err);
+      else resolve();
+    };
+
+    previewVoiceAbort = () => done(new Error('Cancelado'));
+
+    const timer = setTimeout(() => done(new Error('Tempo esgotado ao ouvir a voz')), timeoutMs || 15000);
+
+    if (!previewAudioCtx) previewAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = previewAudioCtx;
+
+    function queueChunk(b64) {
+      const int16 = new Int16Array(base64ToArrayBuffer(b64));
+      const f32 = int16ToFloat32(int16);
+      if (f32.length === 0) return;
+      heardAudio = true;
+      const ab = ctx.createBuffer(1, f32.length, 24000);
+      ab.copyToChannel(f32, 0);
+      const src = ctx.createBufferSource();
+      src.buffer = ab;
+      src.connect(ctx.destination);
+      const at = Math.max(nextPlay, ctx.currentTime);
+      src.start(at);
+      nextPlay = at + ab.duration;
+    }
+
+    const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`;
+    ws = new WebSocket(url);
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({
+        setup: {
+          model: GEMINI_MODEL_FALLBACKS[0],
+          generationConfig: {
+            responseModalities: ['AUDIO'],
+            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
+            temperature: 0.2,
+          },
+          systemInstruction: {
+            parts: [{ text: 'Repita em voz alta, com entonação natural, exatamente o texto que o usuário enviar. Não acrescente nada.' }],
+          },
+        },
+      }));
+    };
+
+    ws.onmessage = async (e) => {
+      const raw = e.data instanceof Blob ? await e.data.text() : e.data;
+      let msg;
+      try { msg = JSON.parse(raw); } catch (_) { return; }
+
+      if (msg.error) {
+        done(new Error(msg.error.message || 'Erro ao ouvir a voz'));
+        return;
+      }
+
+      if (msg.setupComplete !== undefined) {
+        ws.send(JSON.stringify({
+          realtimeInput: { text: phrase },
+        }));
+        return;
+      }
+
+      const sc = msg.serverContent;
+      if (!sc) return;
+
+      if (sc.modelTurn?.parts) {
+        if (ctx.state === 'suspended') await ctx.resume();
+        for (const part of sc.modelTurn.parts) {
+          if (part.inlineData?.mimeType?.startsWith('audio/pcm') && part.inlineData.data) {
+            queueChunk(part.inlineData.data);
+          }
+        }
+      }
+
+      if (sc.turnComplete) {
+        if (!heardAudio) {
+          done(new Error('Nenhum áudio recebido'));
+          return;
+        }
+        const waitMs = Math.max(400, (nextPlay - ctx.currentTime) * 1000 + 250);
+        setTimeout(() => done(), waitMs);
+      }
+    };
+
+    ws.onerror = () => done(new Error('Erro de conexão ao ouvir a voz'));
+    ws.onclose = () => { if (!settled && !heardAudio) done(new Error('Conexão fechada')); };
+  });
+}
+
+// ==========================================
+// HOOK: useTranslator
+// ==========================================
+function useTranslator() {
+  const [status, setStatus] = React.useState('idle'); // idle | connecting | active | reconnecting | error
+  const [paused, setPaused] = React.useState(false);
+  const [audioOn, setAudioOn] = React.useState(true);
+  const [micOn, setMicOn] = React.useState(true);
+  const [elapsed, setElapsed] = React.useState(0);
+  const [error, setError] = React.useState(null);
+  const [transA, setTransA] = React.useState([]);
+  const [transB, setTransB] = React.useState([]);
+  const configRef = React.useRef(null);
+  const wsRef = React.useRef(null);
+  const inputCtxRef = React.useRef(null);
+  const outputCtxRef = React.useRef(null);
+  const micStreamRef = React.useRef(null);
+  const micSourceRef = React.useRef(null);
+  const workletRef = React.useRef(null);
+  const scriptProcessorRef = React.useRef(null);
+  const micMonitorGainRef = React.useRef(null);
+  const wakeLockRef = React.useRef(null);
+  const nextPlayTimeRef = React.useRef(0);
+  const reconnectRef = React.useRef(0);
+  const reconnectTimerRef = React.useRef(null);
+  const plannedReconnectTimerRef = React.useRef(null);
+  const timerRef = React.useRef(null);
+  const startTimeRef = React.useRef(null);
+  const pausedRef = React.useRef(false);
+  const audioOnRef = React.useRef(true);
+  const micOnRef = React.useRef(true);
+  const statusRef = React.useRef('idle');
+  const lastInputLangRef = React.useRef(null);
+  const outputTargetRef = React.useRef(null);
+  const historyLogRef = React.useRef([]);
+  const manualSocketCloseRef = React.useRef(false);
+  const inputAccumRef = React.useRef(false);
+  const outputAccumRef = React.useRef(false);
+  const isPlayingAudioRef = React.useRef(false);
+  const playEndTimeoutRef = React.useRef(null);
+  const transLenRef = React.useRef({ A: 0, B: 0 });
+  const searchModeRef = React.useRef(false);
+  const searchOnUtteranceRef = React.useRef(null);
+  const searchUtteranceBufRef = React.useRef('');
+  const inputSampleRateRef = React.useRef(16000);
+  const liveModelRef = React.useRef(GEMINI_MODEL_FALLBACKS[0]);
+  const suppressMicUntilRef = React.useRef(0);
+
+  React.useEffect(() => { pausedRef.current = paused; }, [paused]);
+  React.useEffect(() => { audioOnRef.current = audioOn; }, [audioOn]);
+  React.useEffect(() => { micOnRef.current = micOn; }, [micOn]);
+  React.useEffect(() => { statusRef.current = status; }, [status]);
+
+  React.useEffect(() => {
+    const onVisible = async () => {
+      if (document.visibilityState !== 'visible') return;
+      if (statusRef.current !== 'active') return;
+      await resumeAudioContexts();
+      await requestWakeLock();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
+  function resetTurnRouting() {
+    lastInputLangRef.current = null;
+    outputTargetRef.current = null;
+    inputAccumRef.current = false;
+    outputAccumRef.current = false;
+  }
+
+  function resetTranscriptionState() {
+    resetTurnRouting();
+    historyLogRef.current = [];
+  }
+
+  function pushHistory(entry, replaceLast) {
+    if (replaceLast && historyLogRef.current.length > 0) {
+      historyLogRef.current[historyLogRef.current.length - 1] = entry;
+    } else {
+      historyLogRef.current.push(entry);
+    }
+    if (historyLogRef.current.length > MAX_SESSION_HISTORY) {
+      historyLogRef.current = historyLogRef.current.slice(-MAX_SESSION_HISTORY);
+    }
+  }
+
+  function recentContextText() {
+    const cfg = configRef.current;
+    if (!cfg) return '';
+    const a = langById(cfg.langA), b = langById(cfg.langB);
+    return historyLogRef.current.slice(-MAX_CONTEXT_ENTRIES).map((h) => {
+      const side = h.side === 'A' ? a?.label : h.side === 'B' ? b?.label : 'desconhecido';
+      const kind = h.isOutput ? 'tradução' : 'fala original';
+      return `- ${side || 'idioma'} / ${kind}: ${h.text}`;
+    }).join('\n');
+  }
+
+  function beginNewTurn() {
+    inputAccumRef.current = false;
+    outputAccumRef.current = false;
+    outputTargetRef.current = null;
+  }
+
+  function resolveTarget(detected, a, b) {
+    if (detected === a.base && detected !== b.base) return 'A';
+    if (detected === b.base && detected !== a.base) return 'B';
+    return null;
+  }
+
+  function resolvePanelForLang(langId) {
+    const cfg = configRef.current;
+    if (!cfg) return 'B';
+    if (langId === cfg.langA) return 'A';
+    if (langId === cfg.langB) return 'B';
+    const lang = langById(langId);
+    const a = langById(cfg.langA), b = langById(cfg.langB);
+    if (lang?.base === a?.base && lang?.base !== b?.base) return 'A';
+    if (lang?.base === b?.base && lang?.base !== a?.base) return 'B';
+    return 'B';
+  }
+
+  function normalizeSearchLang(langId) {
+    if (langId === 'pt-BR' || langId === 'en-US' || langId === 'en-GB' || langId === 'it') {
+      return langId;
+    }
+    return configRef.current?.langB || 'en-US';
+  }
+
+  function setSearchMode(on, onUtterance) {
+    searchModeRef.current = !!on;
+    searchOnUtteranceRef.current = on ? onUtterance : null;
+    if (!on) {
+      searchUtteranceBufRef.current = '';
+    }
+  }
+
+  // INPUT: o que foi dito (mic) ou digitado. Incremental = SUBSTITUI último item do mesmo turno.
+  function appendInputTranscription(text, opts) {
+    if (!text || !text.trim()) return;
+
+    if (searchModeRef.current) {
+      const isAccum = inputAccumRef.current;
+      if (!isAccum && !opts?.skipBeginTurn) beginNewTurn();
+      inputAccumRef.current = true;
+      searchUtteranceBufRef.current = isAccum
+        ? (searchUtteranceBufRef.current + ' ' + text).trim()
+        : text.trim();
+      return;
+    }
+
+    const cfg = configRef.current;
+    if (!cfg) return;
+    const a = langById(cfg.langA), b = langById(cfg.langB);
+    if (!a || !b) return;
+
+    const isAccum = inputAccumRef.current;
+    if (!isAccum && !opts?.skipBeginTurn) beginNewTurn();
+
+    outputTargetRef.current = null;
+    outputAccumRef.current = false;
+
+    const detected = detectBase(text);
+    if (detected) lastInputLangRef.current = detected;
+
+    const target = resolveTarget(detected, a, b) || 'A';
+    inputAccumRef.current = true;
+
+    const entry = { text, isOutput: false, side: target, ts: Date.now() };
+    const setter = target === 'A' ? setTransA : setTransB;
+    setter(prev => {
+      const next = isAccum && prev.length > 0 ? [...prev.slice(0, -1), entry] : [...prev, entry];
+      const capped = next.length > MAX_TRANSLATIONS ? next.slice(-MAX_TRANSLATIONS) : next;
+      transLenRef.current[target] = capped.length;
+      return capped;
+    });
+    pushHistory(entry, isAccum);
+  }
+
+  // OUTPUT: a tradução gerada pelo modelo. Vai pro lado OPOSTO ao input.
+  // Fragmentos da mesma resposta CONCATENAM no mesmo item.
+  function appendOutputTranscription(text) {
+    if (searchModeRef.current) return;
+    if (!text || !text.trim()) return;
+    const cfg = configRef.current;
+    if (!cfg) return;
+    const a = langById(cfg.langA), b = langById(cfg.langB);
+    if (!a || !b) return;
+
+    inputAccumRef.current = false;
+
+    let target = outputTargetRef.current;
+    if (!target) {
+      const inputLang = lastInputLangRef.current;
+      if (inputLang === a.base && inputLang !== b.base) target = 'B';
+      else if (inputLang === b.base && inputLang !== a.base) target = 'A';
+      else {
+        const det = detectBase(text);
+        target = resolveTarget(det, a, b) || 'B';
+      }
+      outputTargetRef.current = target;
+    }
+
+    const isAccum = outputAccumRef.current;
+    outputAccumRef.current = true;
+
+    const setter = target === 'A' ? setTransA : setTransB;
+    setter(prev => {
+      let next;
+      if (isAccum && prev.length > 0) {
+        const last = prev[prev.length - 1];
+        const merged = { text: last.text + ' ' + text, isOutput: true, side: target, ts: last.ts || Date.now() };
+        next = [...prev.slice(0, -1), merged];
+        pushHistory(merged, true);
+      } else {
+        const entry = { text, isOutput: true, side: target, ts: Date.now() };
+        next = [...prev, entry];
+        pushHistory(entry, false);
+      }
+      const capped = next.length > MAX_TRANSLATIONS ? next.slice(-MAX_TRANSLATIONS) : next;
+      transLenRef.current[target] = capped.length;
+      return capped;
+    });
+
+    if (navigator.vibrate) navigator.vibrate(50);
+  }
+
+  function speakSearchResult(text, langId) {
+    if (!audioOnRef.current) return;
+    const normalizedLangId = normalizeSearchLang(langId);
+    const cfg = configRef.current || {};
+    suppressMicUntilRef.current = Date.now() + 13000;
+    playLiveSpeech(cfg.voice || 'Aoede', normalizedLangId, text, 12000).then(() => {
+      suppressMicUntilRef.current = Date.now() + 300;
+    }).catch(() => {
+      if (!('speechSynthesis' in window)) return;
+      const lang = langById(normalizedLangId);
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = lang?.id === 'it' ? 'it-IT' : (lang?.id || 'pt-BR');
+      utterance.rate = 1;
+      utterance.pitch = 1;
+      utterance.onend = () => { suppressMicUntilRef.current = Date.now() + 300; };
+      utterance.onerror = () => { suppressMicUntilRef.current = Date.now() + 300; };
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(utterance);
+    });
+  }
+
+  function addSearchResult(text, langId) {
+    if (!text || !text.trim()) return;
+    setSearchMode(false, null);
+    resetTurnRouting();
+    const normalizedLangId = normalizeSearchLang(langId);
+    const target = resolvePanelForLang(normalizedLangId);
+    const entry = { text: text.trim(), isOutput: true, side: target, ts: Date.now(), isSearch: true, langId: normalizedLangId };
+    const setter = target === 'A' ? setTransA : setTransB;
+    setter(prev => {
+      const next = [...prev, entry];
+      const capped = next.length > MAX_TRANSLATIONS ? next.slice(-MAX_TRANSLATIONS) : next;
+      transLenRef.current[target] = capped.length;
+      return capped;
+    });
+    speakSearchResult(entry.text, normalizedLangId);
+    if (navigator.vibrate) navigator.vibrate(50);
+  }
+
+  function playAudioChunk(b64) {
+    if (searchModeRef.current) return;
+    if (!audioOnRef.current) {
+      isPlayingAudioRef.current = false;
+      return;
+    }
+    if (!outputCtxRef.current) return;
+    if (outputCtxRef.current.state === 'suspended') {
+      outputCtxRef.current.resume().catch(() => {});
+      return;
+    }
+    const buf = base64ToArrayBuffer(b64);
+    const int16 = new Int16Array(buf);
+    const f32 = int16ToFloat32(int16);
+    if (f32.length === 0) return;
+    const ctx = outputCtxRef.current;
+    const ab = ctx.createBuffer(1, f32.length, 24000);
+    ab.copyToChannel(f32, 0);
+    const src = ctx.createBufferSource();
+    src.buffer = ab;
+    src.connect(ctx.destination);
+    const now = ctx.currentTime;
+    const at = Math.max(nextPlayTimeRef.current, now);
+    src.start(at);
+    nextPlayTimeRef.current = at + ab.duration;
+
+    isPlayingAudioRef.current = true;
+    clearTimeout(playEndTimeoutRef.current);
+    const endMs = (at + ab.duration - now) * 1000 + 300;
+    playEndTimeoutRef.current = setTimeout(() => {
+      isPlayingAudioRef.current = false;
+      // segura mais 400ms depois do áudio acabar, pra cobrir a cauda do eco na sala
+      suppressMicUntilRef.current = Date.now() + 400;
+    }, endMs);
+  }
+
+  function interruptPlayback() {
+    if (outputCtxRef.current) {
+      nextPlayTimeRef.current = outputCtxRef.current.currentTime;
+    }
+    isPlayingAudioRef.current = false;
+    clearTimeout(playEndTimeoutRef.current);
+  }
+
+  function sendSetup(modelName) {
+    const cfg = configRef.current;
+    const context = recentContextText();
+    wsRef.current.send(JSON.stringify({
+      setup: {
+        model: modelName || liveModelRef.current,
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: cfg.voice || 'Aoede' } } },
+          temperature: 0.3,
+        },
+        systemInstruction: { parts: [{ text: buildSystemPrompt(cfg.langA, cfg.langB, context) }] },
+        outputAudioTranscription: {},
+        inputAudioTranscription: {},
+        contextWindowCompression: { slidingWindow: {} },
+        realtimeInputConfig: {
+          automaticActivityDetection: {
+            startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
+            endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
+            prefixPaddingMs: 200,
+            silenceDurationMs: 700,
+          },
+        },
+      }
+    }));
+  }
+
+  function handleServerMessage(text, resolveSetup, rejectSetup) {
+    let msg;
+    try { msg = JSON.parse(text); } catch (e) { return; }
+    if (msg.error) {
+      const errMsg = msg.error.message || 'Erro da API Gemini';
+      // #region agent log
+      DEBUG_LOG('index.html:handleServerMessage', 'API error', { errMsg, status: statusRef.current }, 'C');
+      // #endregion
+      setError(errMsg);
+      if (rejectSetup) rejectSetup(new Error(errMsg));
+      return;
+    }
+    if (msg.goAway) {
+      reconnectSoon('server-go-away', 250);
+      return;
+    }
+    if (msg.setupComplete !== undefined) {
+      if (resolveSetup) resolveSetup();
+      return;
+    }
+    const sc = msg.serverContent;
+    if (!sc) return;
+    if (sc.modelTurn?.parts) {
+      for (const part of sc.modelTurn.parts) {
+        if (part.inlineData?.mimeType?.startsWith('audio/pcm') && part.inlineData.data) {
+          playAudioChunk(part.inlineData.data);
+        }
+      }
+    }
+    if (sc.inputTranscription?.text) {
+      appendInputTranscription(sc.inputTranscription.text);
+    }
+    if (sc.outputTranscription?.text) {
+      appendOutputTranscription(sc.outputTranscription.text);
+    }
+    if (sc.turnComplete) {
+      if (searchModeRef.current && searchUtteranceBufRef.current.trim()) {
+        const utterance = searchUtteranceBufRef.current.trim();
+        searchUtteranceBufRef.current = '';
+        inputAccumRef.current = false;
+        const cb = searchOnUtteranceRef.current;
+        if (cb) cb(utterance);
+      } else {
+        inputAccumRef.current = false;
+        outputAccumRef.current = false;
+        outputTargetRef.current = null;
+      }
+    }
+    if (sc.interrupted) {
+      interruptPlayback();
+      outputAccumRef.current = false;
+      outputTargetRef.current = null;
+    }
+  }
+
+  function connectWebSocketWithModel(apiKey, modelName) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (!settled) { settled = true; reject(new Error('Tempo esgotado ao conectar. Verifique sua API key e internet.')); }
+      }, 30000);
+      const ok = (v) => { if (!settled) { settled = true; clearTimeout(timeout); resolve(v); } };
+      const fail = (e) => { if (!settled) { settled = true; clearTimeout(timeout); reject(e); } };
+
+      const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${encodeURIComponent(apiKey)}`;
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
+      manualSocketCloseRef.current = false;
+      liveModelRef.current = modelName;
+      ws.onopen = () => sendSetup(modelName);
+      ws.onmessage = async (e) => {
+        const t = e.data instanceof Blob ? await e.data.text() : e.data;
+        handleServerMessage(t, ok, fail);
+      };
+      ws.onerror = () => fail(new Error('Erro de conexão com a API'));
+      ws.onclose = (ev) => {
+        // #region agent log
+        DEBUG_LOG('index.html:ws.onclose', 'WebSocket closed', {
+          code: ev.code, reason: ev.reason, status: statusRef.current, reconnect: reconnectRef.current,
+        }, 'C');
+        // #endregion
+        if (!settled) {
+          fail(new Error(ev.reason || 'Conexão fechada antes de completar setup'));
+          return;
+        }
+        if (manualSocketCloseRef.current) {
+          manualSocketCloseRef.current = false;
+          return;
+        }
+        if (statusRef.current === 'active' || pausedRef.current) {
+          scheduleReconnect();
+        }
+      };
+    });
+  }
+
+  async function connectWebSocket(apiKey) {
+    let lastError = null;
+    for (const modelName of GEMINI_MODEL_FALLBACKS) {
+      try {
+        await connectWebSocketWithModel(apiKey, modelName);
+        liveModelRef.current = modelName;
+        return;
+      } catch (e) {
+        lastError = e;
+        if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
+          try {
+            wsRef.current.onclose = null;
+            wsRef.current.close();
+          } catch (_) {}
+        }
+        const message = (e?.message || '').toLowerCase();
+        const shouldTryNext = /model|not found|not_found|unsupported|invalid argument|deprecated|unavailable/.test(message);
+        if (!shouldTryNext) break;
+      }
+    }
+    throw lastError || new Error('Não foi possível conectar à Live API.');
+  }
+
+  function clearReconnectTimers() {
+    clearTimeout(reconnectTimerRef.current);
+    clearTimeout(plannedReconnectTimerRef.current);
+    reconnectTimerRef.current = null;
+    plannedReconnectTimerRef.current = null;
+  }
+
+  function schedulePlannedReconnect() {
+    clearTimeout(plannedReconnectTimerRef.current);
+    plannedReconnectTimerRef.current = setTimeout(() => {
+      reconnectSoon('preventive-refresh', 0);
+    }, PLANNED_RECONNECT_MS);
+  }
+
+  function reconnectSoon(reason, delay) {
+    if (statusRef.current === 'idle') return;
+    clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = setTimeout(async () => {
+      if (statusRef.current === 'idle') return;
+      setStatus('reconnecting');
+      resetTurnRouting();
+      interruptPlayback();
+      const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
+      try {
+        if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
+          manualSocketCloseRef.current = true;
+          try {
+            wsRef.current.onclose = null;
+            wsRef.current.close();
+          } catch (_) {}
+        }
+        await connectWebSocket(apiKey);
+        setError(null);
+        setStatus('active');
+        reconnectRef.current = 0;
+        schedulePlannedReconnect();
+        DEBUG_LOG('index.html:reconnectSoon', 'Reconnect ok', { reason }, 'R');
+      } catch (e) {
+        DEBUG_LOG('index.html:reconnectSoon', 'Reconnect failed', { reason, error: e.message }, 'R');
+        scheduleReconnect();
+      }
+    }, delay || 0);
+  }
+
+  function scheduleReconnect() {
+    reconnectRef.current++;
+    if (reconnectRef.current > 5) {
+      setError('Não foi possível reconectar. Verifique a internet.');
+      stop();
+      return;
+    }
+    setStatus('reconnecting');
+    const delay = Math.min(1000 * reconnectRef.current, 5000);
+    clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = setTimeout(async () => {
+      if (statusRef.current === 'idle') return;
+      try {
+        const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
+        resetTurnRouting();
+        await connectWebSocket(apiKey);
+        setError(null);
+        setStatus('active');
+        reconnectRef.current = 0;
+        schedulePlannedReconnect();
+      } catch (e) { scheduleReconnect(); }
+    }, delay);
+  }
+
+  async function resumeAudioContexts() {
+    for (const ctx of [inputCtxRef.current, outputCtxRef.current]) {
+      if (ctx && ctx.state === 'suspended') await ctx.resume();
+    }
+  }
+
+  async function initAudio() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('Microfone indisponível neste navegador. Abra no Safari/Chrome com HTTPS.');
+    }
+
+    inputCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    outputCtxRef.current = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+    await resumeAudioContexts();
+    inputSampleRateRef.current = Math.round(inputCtxRef.current.sampleRate || 16000);
+    nextPlayTimeRef.current = outputCtxRef.current.currentTime;
+
+    micStreamRef.current = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+      }
+    });
+
+    const sendMicPcm = (buffer) => {
+      if (pausedRef.current || !micOnRef.current) return;
+      if (Date.now() < suppressMicUntilRef.current) return;
+      if (isPlayingAudioRef.current) return; // não manda mic enquanto o app está falando (evita loop de eco)
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+      const b64 = arrayBufferToBase64(buffer);
+      wsRef.current.send(JSON.stringify({
+        realtimeInput: {
+          audio: { mimeType: `audio/pcm;rate=${inputSampleRateRef.current}`, data: b64 }
+        }
+      }));
+    };
+
+    const source = inputCtxRef.current.createMediaStreamSource(micStreamRef.current);
+    micSourceRef.current = source;
+    micMonitorGainRef.current = inputCtxRef.current.createGain();
+    micMonitorGainRef.current.gain.value = 0;
+    micMonitorGainRef.current.connect(inputCtxRef.current.destination);
+
+    if (inputCtxRef.current.audioWorklet && window.AudioWorkletNode) {
+      try {
+        await inputCtxRef.current.audioWorklet.addModule('mic-worklet.js');
+        workletRef.current = new AudioWorkletNode(inputCtxRef.current, 'mic-processor');
+        workletRef.current.port.onmessage = (e) => sendMicPcm(e.data);
+        source.connect(workletRef.current);
+        workletRef.current.connect(micMonitorGainRef.current);
+        return;
+      } catch (e) {
+        DEBUG_LOG('index.html:initAudio', 'AudioWorklet failed; using ScriptProcessor fallback', { error: e.message }, 'MIC');
+      }
+    }
+
+    let fallbackBuffer = [];
+    let fallbackSamples = 0;
+    const chunkSize = Math.max(1, Math.round(inputSampleRateRef.current * MIC_CHUNK_MS / 1000));
+    scriptProcessorRef.current = inputCtxRef.current.createScriptProcessor(4096, 1, 1);
+    scriptProcessorRef.current.onaudioprocess = (event) => {
+      const channel = event.inputBuffer.getChannelData(0);
+      fallbackBuffer.push(new Float32Array(channel));
+      fallbackSamples += channel.length;
+      while (fallbackSamples >= chunkSize) {
+        const pcm = new Int16Array(chunkSize);
+        let out = 0;
+        while (out < chunkSize && fallbackBuffer.length) {
+          const first = fallbackBuffer[0];
+          const take = Math.min(first.length, chunkSize - out);
+          for (let i = 0; i < take; i++) {
+            const s = Math.max(-1, Math.min(1, first[i]));
+            pcm[out++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+          if (take === first.length) fallbackBuffer.shift();
+          else fallbackBuffer[0] = first.subarray(take);
+          fallbackSamples -= take;
+        }
+        sendMicPcm(pcm.buffer);
+      }
+    };
+    source.connect(scriptProcessorRef.current);
+    scriptProcessorRef.current.connect(micMonitorGainRef.current);
+  }
+
+  async function requestWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    try { wakeLockRef.current = await navigator.wakeLock.request('screen'); }
+    catch (e) {}
+  }
+
+  function startTimer() {
+    startTimeRef.current = Date.now();
+    setElapsed(0);
+    timerRef.current = setInterval(() => {
+      const secs = Math.floor((Date.now() - startTimeRef.current) / 1000);
+      setElapsed(secs);
+      if (secs > 0 && secs % 300 === 0) {
+        // #region agent log
+        DEBUG_LOG('index.html:sessionTimer', 'Session health', {
+          elapsedSecs: secs,
+          transA: transLenRef.current.A,
+          transB: transLenRef.current.B,
+          wsOpen: wsRef.current?.readyState === 1,
+        }, 'B');
+        // #endregion
+      }
+    }, 1000);
+  }
+  function stopTimer() {
+    clearInterval(timerRef.current);
+    timerRef.current = null;
+  }
+
+  async function start(config) {
+    if (statusRef.current !== 'idle') return false;
+    configRef.current = config;
+    const apiKey = APP_CONFIG.DEFAULT_API_KEY || localStorage.getItem('gemini_api_key');
+    if (!apiKey) {
+      setError('Falta a API key (config.js).');
+      return false;
+    }
+    setError(null);
+    setTransA([]); setTransB([]);
+    transLenRef.current = { A: 0, B: 0 };
+    resetTranscriptionState();
+    searchModeRef.current = false;
+    searchOnUtteranceRef.current = null;
+    searchUtteranceBufRef.current = '';
+    setAudioOn(config.audio !== false);
+    setMicOn(true);
+    setPaused(false);
+    setStatus('connecting');
+    try {
+      await initAudio();
+      await connectWebSocket(apiKey);
+      setStatus('active');
+      schedulePlannedReconnect();
+      startTimer();
+      await requestWakeLock();
+      // #region agent log
+      DEBUG_LOG('index.html:start', 'Session started', { langA: config.langA, langB: config.langB, model: liveModelRef.current }, 'C');
+      // #endregion
+      return true;
+    } catch (e) {
+      // #region agent log
+      DEBUG_LOG('index.html:start', 'Session start failed', { error: e.message }, 'C');
+      // #endregion
+      setError('Erro ao iniciar: ' + e.message);
+      setStatus('error');
+      stop();
+      return false;
+    }
+  }
+
+  function stop() {
+    setStatus('idle');
+    setPaused(false);
+    clearReconnectTimers();
+    if (wsRef.current) { try { wsRef.current.close(); } catch(e){} wsRef.current = null; }
+    if (workletRef.current) { workletRef.current.disconnect(); workletRef.current = null; }
+    if (scriptProcessorRef.current) {
+      scriptProcessorRef.current.onaudioprocess = null;
+      scriptProcessorRef.current.disconnect();
+      scriptProcessorRef.current = null;
+    }
+    if (micSourceRef.current) { micSourceRef.current.disconnect(); micSourceRef.current = null; }
+    if (micMonitorGainRef.current) { micMonitorGainRef.current.disconnect(); micMonitorGainRef.current = null; }
+    if (micStreamRef.current) { micStreamRef.current.getTracks().forEach(t => t.stop()); micStreamRef.current = null; }
+    if (inputCtxRef.current) { inputCtxRef.current.close(); inputCtxRef.current = null; }
+    if (outputCtxRef.current) { outputCtxRef.current.close(); outputCtxRef.current = null; }
+    if (wakeLockRef.current) { wakeLockRef.current.release(); wakeLockRef.current = null; }
+    stopTimer();
+    reconnectRef.current = 0;
+  }
+
+  function pause() {
+    sendAudioStreamEnd();
+    setPaused(true);
+  }
+  function resume() {
+    setPaused(false);
+    resumeAudioContexts();
+  }
+  function sendAudioStreamEnd() {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    try {
+      wsRef.current.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+    } catch (_) {}
+  }
+  function toggleAudio() {
+    setAudioOn(v => {
+      const next = !v;
+      if (!next) interruptPlayback();
+      else resumeAudioContexts();
+      return next;
+    });
+  }
+  async function toggleMic() {
+    setMicOn(v => {
+      const next = !v;
+      if (!next) sendAudioStreamEnd();
+      if (next) resumeAudioContexts();
+      return next;
+    });
+  }
+
+  function sendText(text) {
+    if (searchModeRef.current) return;
+    if (!text || !text.trim()) return;
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setError('Sem conexão. Aguarde reconectar ou reinicie a sessão.');
+      return;
+    }
+    const t = text.trim();
+    beginNewTurn();
+    appendInputTranscription(t, { skipBeginTurn: true });
+    wsRef.current.send(JSON.stringify({
+      realtimeInput: { text: t },
+    }));
+  }
+
+  return {
+    status, paused, audioOn, micOn, elapsed, error,
+    transA, transB,
+    start, stop, pause, resume, toggleAudio, toggleMic, sendText, setSearchMode, addSearchResult, resumeAudioContexts,
+    getHistory: () => historyLogRef.current.slice(),
+  };
+}
+
+// ==========================================
+// SMALL COMPONENTS
+// ==========================================
+function LangCard({ lang, selected, onSelect, theme }) {
+  return (
+    <button onClick={onSelect} style={{
+      display: 'flex', alignItems: 'center', gap: 8,
+      padding: '11px 10px', width: '100%',
+      background: selected ? theme.selBg(lang.color) : theme.cardBg,
+      border: selected ? theme.selBorder(lang.color) : (theme.cardBorder || `1px solid ${theme.divider}`),
+      borderRadius: theme.radius, cursor: 'pointer',
+      boxShadow: selected ? 'none' : theme.cardShadow,
+      transition: 'all 0.15s ease', fontFamily: theme.font, outline: 'none',
+    }}>
+      <span style={{ fontSize: 22, lineHeight: 1 }}>{lang.flag}</span>
+      <span style={{
+        fontSize: 13, fontWeight: selected ? 600 : 400,
+        color: selected ? lang.color : theme.text, whiteSpace: 'nowrap',
+      }}>{lang.label}</span>
+      {selected && (
+        <svg width="15" height="15" viewBox="0 0 16 16" style={{ marginLeft: 'auto', flexShrink: 0 }}>
+          <circle cx="8" cy="8" r="8" fill={lang.color} />
+          <path d="M5 8l2 2 4-4" stroke="#fff" strokeWidth="1.5" fill="none"
+                strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+function IOSToggle({ value, onChange, theme }) {
+  return (
+    <button onClick={() => onChange(!value)} style={{
+      width: 51, height: 31, borderRadius: 16, border: 'none', cursor: 'pointer',
+      background: value ? theme.success : '#E5E5EA', position: 'relative',
+      transition: 'background 0.2s ease', padding: 0, flexShrink: 0,
+    }}>
+      <div style={{
+        width: 27, height: 27, borderRadius: '50%', background: '#FFF',
+        position: 'absolute', top: 2, left: value ? 22 : 2,
+        transition: 'left 0.2s ease',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.15)',
+      }} />
+    </button>
+  );
+}
+
+function OptionRow({ label, children, theme }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      padding: '13px 16px', background: theme.cardBg, borderRadius: theme.radius,
+      boxShadow: theme.cardShadow, border: theme.cardBorder || 'none',
+    }}>
+      <span style={{ fontSize: 15, color: theme.text, fontFamily: theme.font }}>{label}</span>
+      {children}
+    </div>
+  );
+}
+
+function LangPicker({ label, value, onChange, theme, open, onToggle }) {
+  const sel = langById(value) || LANGUAGES[0];
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <label style={{
+        fontSize: 12, fontWeight: 700, color: theme.textSec,
+        textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8, display: 'block',
+      }}>{label}</label>
+      <button type="button" onClick={onToggle} style={{
+        width: '100%', padding: '16px 18px', borderRadius: theme.radius,
+        background: theme.cardBg, border: open ? `2px solid ${sel.color}` : (theme.cardBorder || `1px solid ${theme.divider}`),
+        boxShadow: theme.cardShadow, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12,
+        fontFamily: theme.font, outline: 'none', textAlign: 'left',
+      }}>
+        <span style={{ fontSize: 28, lineHeight: 1 }}>{sel.flag}</span>
+        <span style={{ flex: 1, fontSize: 18, fontWeight: 600, color: theme.text }}>{sel.label}</span>
+        <span style={{ fontSize: 14, color: theme.textSec, transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}>▼</span>
+      </button>
+      {open && (
+        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6, animation: 'slideUp 0.2s ease' }}>
+          {LANGUAGES.map(l => (
+            <button key={l.id} type="button" onClick={() => onChange(l.id)} style={{
+              width: '100%', padding: '14px 16px', borderRadius: theme.radius,
+              background: value === l.id ? theme.selBg(l.color) : theme.cardBg,
+              border: value === l.id ? theme.selBorder(l.color) : `1px solid ${theme.divider}`,
+              cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12,
+              fontFamily: theme.font, outline: 'none', textAlign: 'left',
+            }}>
+              <span style={{ fontSize: 24 }}>{l.flag}</span>
+              <span style={{ fontSize: 16, fontWeight: value === l.id ? 600 : 400, color: value === l.id ? l.color : theme.text }}>
+                {l.label}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MicIcon({ size = 16, color = 'currentColor' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 20" fill="none">
+      <rect x="5" y="1" width="6" height="11" rx="3" fill={color} />
+      <path d="M1 9a7 7 0 0014 0" stroke={color} strokeWidth="1.5" fill="none" strokeLinecap="round" />
+      <line x1="8" y1="16" x2="8" y2="19" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function MicMutedIcon({ size = 16, color = 'currentColor' }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 20" fill="none">
+      <rect x="5" y="1" width="6" height="11" rx="3" fill={color} />
+      <path d="M1 9a7 7 0 0014 0" stroke={color} strokeWidth="1.5" fill="none" strokeLinecap="round" />
+      <line x1="8" y1="16" x2="8" y2="19" stroke={color} strokeWidth="1.5" strokeLinecap="round" />
+      <line x1="2" y1="2" x2="14" y2="18" stroke={color} strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// ==========================================
+// TRANSLATION VIEW (legenda grande estilo)
+// ==========================================
+function TranslationView({ lang, translations, theme, padTop, padBot, listening }) {
+  const lastInIdx = translations.map((t, i) => (!t.isOutput ? i : -1)).filter(i => i >= 0).pop();
+  const lastOutIdx = translations.map((t, i) => (t.isOutput ? i : -1)).filter(i => i >= 0).pop();
+  let heroIdx = -1;
+  if (lastInIdx !== undefined && lastOutIdx !== undefined) {
+    heroIdx = lastOutIdx >= lastInIdx ? lastOutIdx : lastInIdx;
+  } else if (lastOutIdx !== undefined) heroIdx = lastOutIdx;
+  else if (lastInIdx !== undefined) heroIdx = lastInIdx;
+  const latest = heroIdx >= 0 ? translations[heroIdx] : null;
+  const displayLang = latest?.langId ? (langById(latest.langId) || lang) : lang;
+  const history = translations.filter((_, i) => i !== heroIdx).slice(-3);
+
+  return (
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column',
+      padding: `${padTop || 12}px 18px ${padBot || 12}px`,
+      background: theme.halfBg(lang.color),
+      overflow: 'hidden', fontFamily: theme.font,
+      minHeight: 0,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        <span style={{ fontSize: 18, lineHeight: 1 }}>{displayLang.flag}</span>
+        <span style={{
+          fontSize: 11, fontWeight: 700, color: displayLang.color,
+          textTransform: 'uppercase', letterSpacing: 0.8,
+        }}>{displayLang.label}</span>
+        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5 }}>
+          <div style={{
+            width: 6, height: 6, borderRadius: '50%',
+            background: listening ? theme.success : '#C0C0C0',
+            boxShadow: listening ? `0 0 6px ${theme.success}80` : 'none',
+            animation: listening ? 'pulse 2s infinite' : 'none',
+          }} />
+          <span style={{ fontSize: 10, color: theme.textSec }}>
+            {listening ? 'Ouvindo' : 'Pausado'}
+          </span>
+        </div>
+      </div>
+
+      <div style={{
+        flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        minHeight: 0, padding: '8px 0',
+      }}>
+        {latest ? (
+          <div key={translations.length} style={{
+            textAlign: 'center', animation: 'slideUp 0.3s ease',
+          }}>
+            <p style={{
+              fontSize: 28, fontWeight: 600, color: theme.text,
+              lineHeight: 1.22, margin: 0,
+              textWrap: 'balance', letterSpacing: -0.3,
+              opacity: latest.isOutput ? 1 : 0.88,
+            }}>{latest.text}</p>
+          </div>
+        ) : (
+          <p style={{
+            fontSize: 14, color: theme.textTer, margin: 0, textAlign: 'center',
+          }}>Aguardando tradução…</p>
+        )}
+      </div>
+
+      {history.length > 0 && (
+        <div style={{
+          flexShrink: 0, display: 'flex', flexDirection: 'column',
+          borderTop: `1px solid ${theme.divider}`,
+          paddingTop: 6,
+        }}>
+          {history.map((t, i, arr) => {
+            const opacity = 0.18 + (i / Math.max(arr.length - 1, 1)) * 0.25;
+            return (
+              <p key={i + '-' + t.text.slice(0, 8)} style={{
+                fontSize: 12, color: theme.text, opacity,
+                margin: '1px 0', lineHeight: 1.3, textAlign: 'center',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+              }}>{t.text}</p>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ==========================================
+// SETUP SCREEN
+// ==========================================
+function SetupScreen({ onStart, theme, error, starting }) {
+  const [langA, setLangA] = React.useState(() => localStorage.getItem('lang_a') || 'pt-BR');
+  const [langB, setLangB] = React.useState(() => localStorage.getItem('lang_b') || 'en-US');
+  const [openPicker, setOpenPicker] = React.useState(null);
+  const [audio, setAudio] = React.useState(true);
+  const [voiceGender, setVoiceGender] = React.useState(() => {
+    const v = localStorage.getItem('voice');
+    return v === VOICE_BY_GENDER.M.id ? 'M' : 'F';
+  });
+  const [restSecs, setRestSecs] = React.useState(() => parseInt(localStorage.getItem('restSecs')) || 60);
+
+  const voice = voiceGender === 'M' ? VOICE_BY_GENDER.M.id : VOICE_BY_GENDER.F.id;
+
+  React.useEffect(() => { localStorage.setItem('lang_a', langA); }, [langA]);
+  React.useEffect(() => { localStorage.setItem('lang_b', langB); }, [langB]);
+  React.useEffect(() => { localStorage.setItem('voice', voice); }, [voice]);
+  React.useEffect(() => { localStorage.setItem('restSecs', restSecs); }, [restSecs]);
+
+  const sameLang = langA === langB;
+
+  function pickVoice(gender) {
+    if (previewVoiceAbort) previewVoiceAbort();
+    setVoiceGender(gender);
+  }
+
+  return (
+    
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column',
+      padding: '20px 20px 24px', background: theme.bg,
+      fontFamily: theme.font, overflow: 'auto',
+    }}>
+      <div style={{ textAlign: 'center', marginBottom: 20, paddingTop: 4 }}>
+        <img src="logo.png" alt="Will Translator" style={{ width: 130, height: 'auto' }} />
+      </div>
+
+      <LangPicker label="Eu falo" value={langA} theme={theme}
+        open={openPicker === 'a'}
+        onToggle={() => setOpenPicker(openPicker === 'a' ? null : 'a')}
+        onChange={(id) => { setLangA(id); setOpenPicker(null); }} />
+
+      <LangPicker label="Outra pessoa fala" value={langB} theme={theme}
+        open={openPicker === 'b'}
+        onToggle={() => setOpenPicker(openPicker === 'b' ? null : 'b')}
+        onChange={(id) => { setLangB(id); setOpenPicker(null); }} />
+
+      <OptionRow label="Traduzir em áudio" theme={theme}>
+        <IOSToggle value={audio} onChange={setAudio} theme={theme} />
+      </OptionRow>
+
+      <OptionRow label="Descanso (seg)" theme={theme}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {[30, 45, 60, 90, 120].map(s => (
+            <button key={s} type="button" onClick={() => setRestSecs(s)} style={{
+              padding: '6px 11px', borderRadius: 8,
+              background: restSecs === s ? theme.primary : theme.cardBg,
+              color: restSecs === s ? '#fff' : theme.text,
+              border: restSecs === s ? 'none' : `1px solid ${theme.divider}`,
+              fontSize: 13, fontWeight: restSecs === s ? 600 : 400,
+              cursor: 'pointer', fontFamily: theme.font,
+            }}>{s}</button>
+          ))}
+        </div>
+      </OptionRow>
+
+      {audio && (
+        <>
+          <label style={{
+            fontSize: 12, fontWeight: 700, color: theme.textSec,
+            textTransform: 'uppercase', letterSpacing: 0.8, marginTop: 14, marginBottom: 8, display: 'block',
+          }}>Voz da tradução</label>
+          <p style={{ fontSize: 12, color: theme.textSec, margin: '0 0 10px' }}>
+            Toque para selecionar
+          </p>
+          {['F', 'M'].map(g => {
+            const info = VOICE_BY_GENDER[g];
+            const selected = voiceGender === g;
+            return (
+              <button key={g} type="button" onClick={() => pickVoice(g)} style={{
+                width: '100%', padding: '16px 18px', marginBottom: 8, borderRadius: theme.radius,
+                background: selected ? theme.primary + '14' : theme.cardBg,
+                border: selected ? `2px solid ${theme.primary}` : (theme.cardBorder || `1px solid ${theme.divider}`),
+                cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 12,
+                fontFamily: theme.font, outline: 'none', textAlign: 'left',
+              }}>
+                <span style={{
+                  width: 40, height: 40, borderRadius: '50%', flexShrink: 0,
+                  background: g === 'F' ? '#E91E8C18' : '#2563EB18',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 20,
+                }}>{g === 'F' ? '♀' : '♂'}</span>
+                <span style={{ flex: 1 }}>
+                  <span style={{ display: 'block', fontSize: 17, fontWeight: 600, color: theme.text }}>{info.label}</span>
+                  <span style={{ display: 'block', fontSize: 12, color: theme.textSec, marginTop: 2 }}>
+                    {selected ? 'Selecionada' : 'Toque para selecionar'}
+                  </span>
+                </span>
+                <span style={{ fontSize: 22 }}>{selected ? '✓' : ''}</span>
+              </button>
+            );
+          })}
+        </>
+      )}
+
+      {sameLang && (
+        <div style={{
+          marginTop: 12, padding: '10px 14px', background: '#FFF3CD', color: '#856404',
+          borderRadius: theme.radius, fontSize: 13,
+        }}>Os dois idiomas precisam ser diferentes.</div>
+      )}
+
+      {error && (
+        <div style={{
+          marginTop: 12, padding: '10px 14px', background: '#FFE0E0', color: theme.danger,
+          borderRadius: theme.radius, fontSize: 13,
+        }}>{error}</div>
+      )}
+
+      
+      <button
+        type="button"
+        onClick={() => !sameLang && !starting && onStart({ langA, langB, audio, voice, restSecs })}
+        disabled={sameLang || starting}
+        style={{
+          width: '100%', padding: '17px', borderRadius: theme.radius, marginTop: 20,
+          background: (sameLang || starting) ? theme.textTer : theme.primary,
+          color: '#FFF', border: 'none', fontSize: 17, fontWeight: 600,
+          cursor: (sameLang || starting) ? 'not-allowed' : 'pointer', fontFamily: theme.font,
+          boxShadow: (sameLang || starting) ? 'none' : `0 4px 14px ${theme.primary}40`,
+        }}>{starting ? 'Conectando...' : 'Iniciar Sessão'}</button>
+    </div>
+  );
+}
+
+
+
+// ==========================================
+// ACTIVE SCREEN
+// ==========================================
+function fmtTime(secs) {
+  const m = String(Math.floor(secs / 60)).padStart(2, '0');
+  const s = String(secs % 60).padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+function ActiveScreen({ config, theme, translator, onEnd }) {
+  const [restLeft, setRestLeft] = React.useState(null);
+  const [searchMode, setSearchMode] = React.useState(false);
+  const [searchLang, setSearchLang] = React.useState(config.langA);
+  const [searchLoading, setSearchLoading] = React.useState(false);
+  const [searchHeard, setSearchHeard] = React.useState('');
+  const [typedText, setTypedText] = React.useState('');
+  const [layout, setLayout] = React.useState(() => localStorage.getItem('layout') || 'vertical');
+  const [showLayoutMenu, setShowLayoutMenu] = React.useState(false);
+
+  const runSearchRef = React.useRef(null);
+
+  React.useEffect(() => { localStorage.setItem('layout', layout); }, [layout]);
+
+  React.useEffect(() => {
+    if (restLeft === null) return;
+    if (restLeft === 0) {
+      if (navigator.vibrate) navigator.vibrate([300, 100, 300]);
+      const t = setTimeout(() => setRestLeft(null), 2500);
+      return () => clearTimeout(t);
+    }
+    const id = setInterval(() => setRestLeft(s => (s <= 1 ? 0 : s - 1)), 1000);
+    return () => clearInterval(id);
+  }, [restLeft]);
+
+  const runSearch = React.useCallback(async (rawText) => {
+    const { query, langId } = parseSearchRequest(rawText, config, searchLang);
+    if (!query || searchLoading) return;
+    setSearchLang(langId);
+    setSearchLoading(true);
+    setSearchHeard(query);
+    setSearchMode(false);
+    translatorRef.current.setSearchMode(false, null);
+    try {
+      const ans = await searchInternet(query, langId);
+      translatorRef.current.addSearchResult?.(ans, langId);
+      DEBUG_LOG('index.html:runSearch', 'Search ok', { len: ans.length, langId }, 'F');
+    } catch (e) {
+      translatorRef.current.addSearchResult?.(searchErrorText(langId), langId);
+      DEBUG_LOG('index.html:runSearch', 'Search fail', { error: e.message }, 'F');
+    }
+    setSearchLoading(false);
+    setSearchHeard('');
+  }, [config, searchLang, searchLoading]);
+
+  runSearchRef.current = runSearch;
+
+  const translatorRef = React.useRef(translator);
+  translatorRef.current = translator;
+
+  React.useEffect(() => {
+    translatorRef.current.setSearchMode(searchMode, (utterance) => {
+      setSearchHeard(utterance);
+      runSearchRef.current?.(utterance);
+    });
+    return () => translatorRef.current.setSearchMode(false, null);
+  }, [searchMode]);
+
+  function startRest() {
+    DEBUG_LOG('index.html:startRest', 'Rest timer started', { secs: config.restSecs || 60 }, 'E');
+    setRestLeft(config.restSecs || 60);
+  }
+
+  function cancelRest() {
+    setRestLeft(null);
+  }
+
+  function toggleSearchMode() {
+    setSearchMode(on => {
+      const next = !on;
+      if (!next) {
+        setSearchHeard('');
+        setSearchLoading(false);
+      }
+      return next;
+    });
+  }
+
+  function submitInput() {
+    const t = typedText.trim();
+    if (!t) return;
+    translator.resumeAudioContexts?.();
+    if (searchMode) runSearch(t);
+    else translator.sendText(t);
+    setTypedText('');
+  }
+
+  const langA = langById(config.langA);
+  const langB = langById(config.langB);
+  const listening = translator.status === 'active' && !translator.paused && translator.micOn;
+  const isVert = layout !== 'horizontal';
+  const isRotated = layout === 'vertical';
+  const padB = isRotated
+    ? { top: 8, bot: 22 }
+    : isVert
+      ? { top: 10, bot: 10 }
+      : { top: 12, bot: 12 };
+  const padA = isRotated
+    ? { top: 22, bot: 8 }
+    : isVert
+      ? { top: 10, bot: 10 }
+      : { top: 12, bot: 12 };
+
+  const ctrlBtn = (child, opts = {}) => (
+    <button type="button" onClick={opts.onClick} title={opts.title} style={{
+      width: 40, height: 40, borderRadius: '50%',
+      border: `1px solid ${opts.danger ? theme.danger + '40' : opts.active ? theme.primary + '40' : theme.divider}`,
+      background: opts.danger ? theme.danger + '12' : opts.active ? theme.primary + '12' : theme.cardBg,
+      cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+      color: opts.danger ? theme.danger : opts.active ? theme.primary : theme.textSec,
+      outline: 'none', fontSize: 15, flexShrink: 0, fontFamily: theme.font,
+    }}>{child}</button>
+  );
+
+  const actionBtn = (label, onClick, color, disabled) => (
+    <button onClick={onClick} disabled={disabled} style={{
+      flex: 1, padding: '14px 8px', borderRadius: theme.radius,
+      background: disabled ? theme.textTer : color,
+      color: '#FFF', border: 'none', fontSize: 15, fontWeight: 600,
+      cursor: disabled ? 'not-allowed' : 'pointer', fontFamily: theme.font,
+    }}>{label}</button>
+  );
+
+  return (
+    
+    <div style={{
+      height: '100%', display: 'flex', flexDirection: 'column',
+      position: 'relative', fontFamily: theme.font, background: theme.bg,
+    }}>
+      {(translator.error || translator.status === 'reconnecting') && (
+        <div style={{
+          flexShrink: 0, padding: '10px 14px', background: theme.danger + '18',
+          color: theme.danger, fontSize: 13, fontWeight: 600, textAlign: 'center',
+          borderBottom: `1px solid ${theme.danger}40`,
+        }}>
+          {translator.status === 'reconnecting' ? 'Reconectando…' : translator.error}
+        </div>
+      )}
+      {restLeft !== null && (
+        <div style={{
+          position: 'absolute', top: 10, right: 12, zIndex: 60,
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '8px 12px', borderRadius: 24,
+          background: restLeft <= 0 ? theme.success : 'rgba(0,0,0,0.78)',
+          boxShadow: '0 2px 12px rgba(0,0,0,0.2)',
+        }}>
+          <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.75)', textTransform: 'uppercase', letterSpacing: 0.6 }}>
+            {restLeft <= 0 ? 'Pronto' : 'Descanso'}
+          </span>
+          <span style={{
+            fontSize: 20, fontWeight: 600, color: '#fff',
+            fontVariantNumeric: 'tabular-nums', minWidth: 52, textAlign: 'center',
+          }}>{restLeft <= 0 ? '00:00' : fmtTime(restLeft)}</span>
+          {restLeft > 0 && (
+            <button type="button" onClick={cancelRest} aria-label="Parar cronômetro" style={{
+              width: 28, height: 28, borderRadius: '50%', border: 'none',
+              background: 'rgba(255,255,255,0.2)', color: '#fff', fontSize: 16,
+              cursor: 'pointer', lineHeight: 1, fontFamily: theme.font,
+            }}>×</button>
+          )}
+        </div>
+      )}
+
+      {translator.paused && (
+        <PausedOverlay
+          elapsed={translator.elapsed}
+          msgCount={translator.transA.length + translator.transB.length}
+          onResume={translator.resume}
+          onEnd={onEnd}
+          theme={theme} />
+      )}
+
+      <div style={{
+        flex: '1 1 0%', display: 'flex',
+        flexDirection: isVert ? 'column' : 'row',
+        overflow: 'hidden', minHeight: 0,
+      }}>
+        <div style={{
+          flex: 1, display: 'flex', flexDirection: 'column',
+          transform: isRotated ? 'rotate(180deg)' : 'none',
+          overflow: 'hidden', minHeight: 0, minWidth: 0,
+          borderBottom: isVert ? `1px solid ${theme.divider}` : 'none',
+          borderRight: !isVert ? `1px solid ${theme.divider}` : 'none',
+        }}>
+          <TranslationView lang={langB} translations={translator.transB} theme={theme}
+            padTop={padB.top} padBot={padB.bot} listening={listening} />
+        </div>
+        <div style={{
+          flex: 1, display: 'flex', flexDirection: 'column',
+          overflow: 'hidden', minHeight: 0, minWidth: 0,
+        }}>
+          <TranslationView lang={langA} translations={translator.transA} theme={theme}
+            padTop={padA.top} padBot={padA.bot} listening={listening} />
+        </div>
+      </div>
+
+      {showLayoutMenu && (
+        <div style={{
+          position: 'absolute', bottom: 118, left: '50%',
+          transform: 'translateX(-50%)',
+          background: theme.cardBg, borderRadius: theme.radius,
+          boxShadow: '0 6px 24px rgba(0,0,0,0.18)',
+          border: `1px solid ${theme.divider}`,
+          padding: 6, zIndex: 55, width: 210,
+          display: 'flex', flexDirection: 'column', gap: 2,
+        }}>
+          <div style={{
+            fontSize: 10, fontWeight: 700, color: theme.textSec,
+            padding: '6px 10px 4px', letterSpacing: 0.6, textTransform: 'uppercase',
+          }}>Visualização</div>
+          {[
+            { v: 'vertical', l: 'Frente a frente', hint: 'Um de cabeça para baixo' },
+            { v: 'same', l: 'Mesmo lado', hint: 'Os dois em cima e embaixo' },
+            { v: 'horizontal', l: 'Lado a lado', hint: 'Dividido na horizontal' },
+          ].map(opt => (
+            <button key={opt.v} type="button"
+              onClick={() => { setLayout(opt.v); setShowLayoutMenu(false); }}
+              style={{
+                padding: '10px 12px', textAlign: 'left',
+                background: layout === opt.v ? theme.primary + '12' : 'transparent',
+                color: layout === opt.v ? theme.primary : theme.text,
+                border: 'none', borderRadius: 8, cursor: 'pointer',
+                fontSize: 14, fontFamily: theme.font,
+                fontWeight: layout === opt.v ? 600 : 400,
+              }}>
+              <span style={{ display: 'block' }}>{opt.l}</span>
+              <span style={{ fontSize: 11, color: theme.textSec, fontWeight: 400 }}>{opt.hint}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {(searchMode || searchLoading) && (
+        <div style={{
+          flexShrink: 0, padding: '8px 14px', borderTop: `1px solid ${theme.divider}`,
+          background: '#FFF8F0',
+        }}>
+          <p style={{ fontSize: 13, fontWeight: 600, color: '#C2410C', margin: 0 }}>
+            {searchLoading ? '🔎 Pesquisando…' : '🔍 Pesquisa armada — a próxima fala vira resposta no painel'}
+          </p>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+            {LANGUAGES.map(l => (
+              <button key={l.id} type="button" onClick={() => setSearchLang(l.id)} style={{
+                padding: '5px 10px', borderRadius: 8, fontSize: 12,
+                background: searchLang === l.id ? '#FF9500' : theme.cardBg,
+                color: searchLang === l.id ? '#fff' : theme.text,
+                border: searchLang === l.id ? 'none' : `1px solid ${theme.divider}`,
+                cursor: 'pointer', fontFamily: theme.font,
+              }}>{l.flag} {l.short}</button>
+            ))}
+          </div>
+          {searchHeard && (
+            <p style={{ fontSize: 12, color: theme.textSec, margin: '6px 0 0', fontStyle: 'italic' }}>
+              {searchLoading ? 'Buscando: ' : 'Próxima pergunta: '}{searchHeard}
+            </p>
+          )}
+        </div>
+      )}
+
+      <div style={{
+        padding: '10px 16px 8px', borderTop: `1px solid ${theme.divider}`,
+        background: theme.bg, flexShrink: 0,
+      }}>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input
+            type="text"
+            value={typedText}
+            onChange={e => setTypedText(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') submitInput(); }}
+            placeholder={searchMode ? 'Fale no mic ou digite sua pergunta...' : 'Digite para traduzir...'}
+            style={{
+              flex: 1, padding: '12px 14px', borderRadius: theme.radius,
+              border: `1px solid ${theme.divider}`, background: theme.cardBg,
+              color: theme.text, fontSize: 16, outline: 'none', fontFamily: theme.font,
+            }}
+          />
+          <button type="button" onClick={submitInput} disabled={!typedText.trim() || searchLoading} style={{
+            padding: '12px 16px', borderRadius: theme.radius,
+            background: typedText.trim() && !searchLoading ? (searchMode ? '#FF9500' : theme.primary) : theme.textTer,
+            color: '#FFF', border: 'none', fontSize: 15, fontWeight: 600,
+            cursor: typedText.trim() && !searchLoading ? 'pointer' : 'not-allowed', fontFamily: theme.font,
+          }}>{searchMode ? (searchLoading ? '...' : 'Buscar') : 'Enviar'}</button>
+        </div>
+      </div>
+
+      <div style={{ padding: '10px 16px 6px', display: 'flex', gap: 10, flexShrink: 0, borderTop: `1px solid ${theme.divider}` }}>
+        {actionBtn(searchMode ? '✓ Tradutor' : '🔍 Pesquisar', toggleSearchMode, searchMode ? theme.textSec : '#FF9500', false)}
+        {actionBtn('⏱ Cronômetro', startRest, '#5856D6', false)}
+      </div>
+
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10,
+        padding: '6px 16px 12px', flexShrink: 0,
+      }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: theme.textSec, fontVariantNumeric: 'tabular-nums', minWidth: 42 }}>
+          {fmtTime(translator.elapsed)}
+        </span>
+        {ctrlBtn(
+          translator.micOn ? <MicIcon size={14} /> : <MicMutedIcon size={14} />,
+          { onClick: translator.toggleMic, active: translator.micOn, title: 'Microfone' }
+        )}
+        {ctrlBtn(translator.audioOn ? '🔊' : '🔇', {
+          onClick: translator.toggleAudio, active: translator.audioOn, title: 'Áudio',
+        })}
+        {ctrlBtn(
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+            <rect x="1" y="1" width="12" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
+            <rect x="1" y="8" width="12" height="5" rx="1" stroke="currentColor" strokeWidth="1.2"/>
+          </svg>,
+          { onClick: () => setShowLayoutMenu(v => !v), active: showLayoutMenu, title: 'Visualização do chat' }
+        )}
+        {ctrlBtn('⏸', { onClick: translator.pause, title: 'Pausar' })}
+        {ctrlBtn('⏹', { onClick: onEnd, danger: true, title: 'Encerrar' })}
+      </div>
+    </div>
+  );
+}
+
+
+// ==========================================
+// PAUSED OVERLAY
+// ==========================================
+function PausedOverlay({ elapsed, msgCount, onResume, onEnd, theme }) {
+  return (
+    <div style={{
+      position: 'absolute', inset: 0, zIndex: 100,
+      background: 'rgba(0,0,0,0.55)',
+      backdropFilter: 'blur(14px)', WebkitBackdropFilter: 'blur(14px)',
+      display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center', gap: 12,
+      fontFamily: theme.font, animation: 'fadeIn 0.2s ease',
+    }}>
+      <div style={{
+        width: 56, height: 56, borderRadius: '50%',
+        background: 'rgba(255,255,255,0.12)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        marginBottom: 4,
+      }}>
+        <svg width="22" height="26" viewBox="0 0 12 14" fill="none">
+          <rect x="1" y="1" width="4" height="12" rx="1" fill="#FFF"/>
+          <rect x="7" y="1" width="4" height="12" rx="1" fill="#FFF"/>
+        </svg>
+      </div>
+      <span style={{ fontSize: 20, fontWeight: 600, color: '#FFF' }}>Sessão Pausada</span>
+      <span style={{ fontSize: 14, color: 'rgba(255,255,255,0.55)' }}>
+        {fmtTime(elapsed)} · {msgCount} {msgCount === 1 ? 'mensagem' : 'mensagens'}
+      </span>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, width: 200, marginTop: 8 }}>
+        <button onClick={onResume} style={{
+          padding: '15px', borderRadius: theme.radius, width: '100%',
+          background: theme.primary, color: '#FFF', border: 'none',
+          fontSize: 16, fontWeight: 600, cursor: 'pointer', fontFamily: theme.font,
+        }}>Retomar</button>
+        <button onClick={onEnd} style={{
+          padding: '15px', borderRadius: theme.radius, width: '100%',
+          background: 'rgba(255,255,255,0.1)', color: '#FFF',
+          border: '1px solid rgba(255,255,255,0.2)',
+          fontSize: 16, fontWeight: 600, cursor: 'pointer', fontFamily: theme.font,
+        }}>Encerrar</button>
+      </div>
+    </div>
+  );
+}
+
+// ==========================================
+// END SCREEN
+// ==========================================
+function EndScreen({ elapsed, msgCount, history, onNew, theme }) {
+  const [copied, setCopied] = React.useState(false);
+
+  const exportHistory = () => {
+    if (!history || history.length === 0) return;
+    const lines = history.map(h => `[${h.isOutput ? 'Tradução' : 'Original'}] ${h.text}`);
+    const txt = `Sessão Tradutor Will — ${fmtTime(elapsed)}\n\n${lines.join('\n')}`;
+    navigator.clipboard.writeText(txt).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {});
+  };
+
+  return (
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column',
+      alignItems: 'center', justifyContent: 'center',
+      padding: '40px 32px', background: theme.bg,
+      fontFamily: theme.font, gap: 4, minHeight: '100%',
+    }}>
+      <div style={{
+        width: 60, height: 60, borderRadius: '50%',
+        background: theme.success + '15',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        marginBottom: 8,
+      }}>
+        <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+          <path d="M6 14l6 6 10-10" stroke={theme.success} strokeWidth="2.5"
+                strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </div>
+      <h2 style={{ fontSize: 22, fontWeight: 700, color: theme.text, margin: 0 }}>
+        Sessão Encerrada
+      </h2>
+      <p style={{ fontSize: 15, color: theme.textSec, margin: '2px 0 0' }}>
+        Duração: {fmtTime(elapsed)}
+      </p>
+      <p style={{ fontSize: 15, color: theme.textSec, margin: '2px 0 24px' }}>
+        {msgCount} {msgCount === 1 ? 'mensagem traduzida' : 'mensagens traduzidas'}
+      </p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, width: 220 }}>
+        {history && history.length > 0 && (
+          <button onClick={exportHistory} style={{
+            padding: '14px', borderRadius: theme.radius,
+            background: theme.cardBg, color: theme.text,
+            border: `1px solid ${theme.divider}`,
+            fontSize: 15, fontWeight: 500, cursor: 'pointer', fontFamily: theme.font,
+            boxShadow: theme.cardShadow,
+          }}>{copied ? 'Copiado!' : 'Copiar Histórico'}</button>
+        )}
+        <button onClick={onNew} style={{
+          padding: '16px', borderRadius: theme.radius,
+          background: theme.primary, color: '#FFF', border: 'none',
+          fontSize: 17, fontWeight: 600, cursor: 'pointer', fontFamily: theme.font,
+        }}>Nova Sessão</button>
+      </div>
+    </div>
+  );
+}
+
+// ==========================================
+// SPLASH SCREEN
+// ==========================================
+function SplashScreen({ onDone }) {
+  const [fadeOut, setFadeOut] = React.useState(false);
+
+  React.useEffect(() => {
+    const fadeTimer = setTimeout(() => setFadeOut(true), 900);
+    const doneTimer = setTimeout(onDone, 1300);
+    return () => {
+      clearTimeout(fadeTimer);
+      clearTimeout(doneTimer);
+    };
+  }, []);
+
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 9999,
+      background: '#FFFFFF',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      opacity: fadeOut ? 0 : 1,
+      transition: 'opacity 0.45s ease-out',
+    }}>
+      <img
+        src="logo.png"
+        alt="Will Translator"
+        style={{ width: 'min(58vmin, 300px)', height: 'auto', objectFit: 'contain' }}
+      />
+    </div>
+  );
+}
+
+// ==========================================
+// MAIN APP
+// ==========================================
+function TradutorApp() {
+  const [splash, setSplash] = React.useState(true);
+  const [screen, setScreen] = React.useState('setup');
+  const [config, setConfig] = React.useState(null);
+  const [endStats, setEndStats] = React.useState({ elapsed: 0, msgCount: 0, history: [] });
+  const theme = getAppTheme('soft');
+  const translator = useTranslator();
+
+  React.useEffect(() => {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').catch(() => {});
+    }
+  }, []);
+
+  const handleStart = async (cfg) => {
+    setConfig(cfg);
+    const ok = await translator.start(cfg);
+    if (ok) setScreen('active');
+  };
+
+  const handleEnd = () => {
+    setEndStats({
+      elapsed: translator.elapsed,
+      msgCount: translator.transA.length + translator.transB.length,
+      history: translator.getHistory ? translator.getHistory() : [...translator.transA, ...translator.transB],
+    });
+    translator.stop();
+    setScreen('end');
+  };
+
+  return (
+    <div style={{
+      height: '100%', display: 'flex', flexDirection: 'column',
+      position: 'relative', overflow: 'hidden',
+    }}>
+      {splash && <SplashScreen onDone={() => setSplash(false)} />}
+      {!splash && screen === 'setup' && (
+        <SetupScreen onStart={handleStart} theme={theme} error={translator.error}
+          starting={translator.status !== 'idle'} />
+      )}
+      {!splash && screen === 'active' && config && (
+        <ActiveScreen config={config} theme={theme} translator={translator} onEnd={handleEnd} />
+      )}
+      {!splash && screen === 'end' && (
+        <EndScreen
+          elapsed={endStats.elapsed}
+          msgCount={endStats.msgCount}
+          history={endStats.history}
+          onNew={() => setScreen('setup')}
+          theme={theme} />
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<TradutorApp />);
+  </script>
+</body>
+</html>
