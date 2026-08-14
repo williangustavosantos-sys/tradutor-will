@@ -898,7 +898,8 @@ function useTranslator() {
       outputCtxRef.current.resume().catch(() => {});
       return;
     }
-    const buf = base64ToArrayBuffer(b64);
+    let buf;
+    try { buf = base64ToArrayBuffer(b64); } catch (e) { return; }
     const int16 = new Int16Array(buf);
     const f32 = int16ToFloat32(int16);
     if (f32.length === 0) return;
@@ -1029,7 +1030,7 @@ function useTranslator() {
       let settled = false;
       const timeout = setTimeout(() => {
         if (!settled) { settled = true; reject(new Error('Tempo esgotado ao conectar. Verifique sua API key e internet.')); }
-      }, 30000);
+      }, 45000);
       const ok = (v) => { if (!settled) { settled = true; clearTimeout(timeout); resolve(v); } };
       const fail = (e) => { if (!settled) { settled = true; clearTimeout(timeout); reject(e); } };
 
@@ -1260,18 +1261,32 @@ function useTranslator() {
 
   async function requestWakeLock() {
     if (!('wakeLock' in navigator)) return;
-    try {
-      const lock = await navigator.wakeLock.request('screen');
-      wakeLockRef.current = lock;
-      lock.addEventListener('release', () => {
-        // se o SO liberou o lock sozinho (economia de bateria) e a sessão
-        // ainda está ativa e a tela visível, readquire automaticamente
-        if (wakeLockRef.current === lock) wakeLockRef.current = null;
-        if (statusRef.current === 'active' && document.visibilityState === 'visible') {
-          requestWakeLock();
-        }
+    const attempt = (retries) => {
+      navigator.wakeLock.request('screen')
+        .then((lock) => {
+          wakeLockRef.current = lock;
+          lock.addEventListener('release', () => {
+            if (wakeLockRef.current === lock) wakeLockRef.current = null;
+            if (statusRef.current === 'active' && document.visibilityState === 'visible') {
+              if (retries > 0) setTimeout(() => attempt(retries - 1), 1000);
+              else requestWakeLockRetrying(0);
+            }
+          });
+        })
+        .catch(() => {
+          if (retries > 0) setTimeout(() => attempt(retries - 1), 1000);
+        });
+    };
+    attempt(2);
+  }
+
+  function requestWakeLockRetrying(retries) {
+    if (!('wakeLock' in navigator)) return;
+    navigator.wakeLock.request('screen')
+      .then((lock) => { wakeLockRef.current = lock; })
+      .catch(() => {
+        if (retries > 0) setTimeout(() => requestWakeLockRetrying(retries - 1), 1000);
       });
-    } catch (e) {}
   }
 
   function startTimer() {
