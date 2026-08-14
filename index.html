@@ -635,6 +635,8 @@ function useTranslator() {
   const micMonitorGainRef = React.useRef(null);
   const wakeLockRef = React.useRef(null);
   const nextPlayTimeRef = React.useRef(0);
+  const activeSourcesRef = React.useRef([]);
+  const micTrackListenersRef = React.useRef(null);
   const reconnectRef = React.useRef(0);
   const reconnectTimerRef = React.useRef(null);
   const plannedReconnectTimerRef = React.useRef(null);
@@ -775,9 +777,16 @@ function useTranslator() {
     outputAccumRef.current = false;
 
     const detected = detectBase(text);
+    const prevInputLang = lastInputLangRef.current;
     if (detected) lastInputLangRef.current = detected;
 
-    const target = resolveTarget(detected, a, b) || 'A';
+    // se a detecção falhar (frase curta/ambígua), usa o idioma do ÚLTIMO
+    // input bem-sucedido daquele mesmo falante, em vez de sempre cair no painel A
+    let target = resolveTarget(detected, a, b);
+    if (!target && prevInputLang) {
+      target = resolveTarget(prevInputLang, a, b);
+    }
+    target = target || 'A';
     inputAccumRef.current = true;
 
     const entry = { text, isOutput: false, side: target, ts: Date.now() };
@@ -904,16 +913,31 @@ function useTranslator() {
     src.start(at);
     nextPlayTimeRef.current = at + ab.duration;
 
+    // guarda o nó pra poder cortar de verdade no barge-in (interruptPlayback)
+    activeSourcesRef.current.push(src);
+    src.onended = () => {
+      activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== src);
+    };
+
+    // suprime o mic ENQUANTO o app está falando + 400ms de cauda de eco depois
     isPlayingAudioRef.current = true;
     clearTimeout(playEndTimeoutRef.current);
     const endMs = (at + ab.duration - now) * 1000 + 300;
-    playEndTimeoutRef.current = setTimeout(() => { isPlayingAudioRef.current = false; }, endMs);
+    playEndTimeoutRef.current = setTimeout(() => {
+      isPlayingAudioRef.current = false;
+      suppressMicUntilRef.current = Date.now() + 400;
+    }, endMs);
   }
 
   function interruptPlayback() {
     if (outputCtxRef.current) {
       nextPlayTimeRef.current = outputCtxRef.current.currentTime;
     }
+    // corta de verdade qualquer áudio já agendado tocando, em vez de só resetar o ponteiro de tempo
+    for (const src of activeSourcesRef.current) {
+      try { src.onended = null; src.stop(); } catch (_) {}
+    }
+    activeSourcesRef.current = [];
     isPlayingAudioRef.current = false;
     clearTimeout(playEndTimeoutRef.current);
   }
@@ -934,7 +958,12 @@ function useTranslator() {
         inputAudioTranscription: {},
         contextWindowCompression: { slidingWindow: {} },
         realtimeInputConfig: {
-          automaticActivityDetection: {},
+          automaticActivityDetection: {
+            startOfSpeechSensitivity: 'START_SENSITIVITY_LOW',
+            endOfSpeechSensitivity: 'END_SENSITIVITY_LOW',
+            prefixPaddingMs: 200,
+            silenceDurationMs: 700,
+          },
         },
       }
     }));
@@ -1068,6 +1097,7 @@ function useTranslator() {
 
   function schedulePlannedReconnect() {
     clearTimeout(plannedReconnectTimerRef.current);
+    if (pausedRef.current) return; // não agenda reconexão preventiva enquanto pausado
     plannedReconnectTimerRef.current = setTimeout(() => {
       reconnectSoon('preventive-refresh', 0);
     }, PLANNED_RECONNECT_MS);
@@ -1106,7 +1136,7 @@ function useTranslator() {
   function scheduleReconnect() {
     reconnectRef.current++;
     if (reconnectRef.current > 5) {
-      setError('Não foi possível reconectar. Verifique a internet.');
+      setError('Não foi possível reconectar. Verifique a internet e toque em Iniciar Sessão de novo.');
       stop();
       return;
     }
@@ -1153,9 +1183,24 @@ function useTranslator() {
       }
     });
 
+    // detecta se o SO tomou o mic de volta (outro app, permissão revogada, etc.)
+    // e avisa em vez de deixar a sessão "ativa" travada em silêncio
+    const micTrack = micStreamRef.current.getAudioTracks()[0];
+    if (micTrack) {
+      const onMicLost = () => {
+        if (statusRef.current !== 'idle') {
+          setError('Microfone perdido — encerre e inicie a sessão de novo.');
+        }
+      };
+      micTrack.addEventListener('ended', onMicLost);
+      micTrack.addEventListener('mute', onMicLost);
+      micTrackListenersRef.current = { track: micTrack, handler: onMicLost };
+    }
+
     const sendMicPcm = (buffer) => {
       if (pausedRef.current || !micOnRef.current) return;
       if (Date.now() < suppressMicUntilRef.current) return;
+      if (isPlayingAudioRef.current) return; // não manda mic enquanto o app está falando (evita loop de eco)
       if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
       const b64 = arrayBufferToBase64(buffer);
       wsRef.current.send(JSON.stringify({
@@ -1215,8 +1260,18 @@ function useTranslator() {
 
   async function requestWakeLock() {
     if (!('wakeLock' in navigator)) return;
-    try { wakeLockRef.current = await navigator.wakeLock.request('screen'); }
-    catch (e) {}
+    try {
+      const lock = await navigator.wakeLock.request('screen');
+      wakeLockRef.current = lock;
+      lock.addEventListener('release', () => {
+        // se o SO liberou o lock sozinho (economia de bateria) e a sessão
+        // ainda está ativa e a tela visível, readquire automaticamente
+        if (wakeLockRef.current === lock) wakeLockRef.current = null;
+        if (statusRef.current === 'active' && document.visibilityState === 'visible') {
+          requestWakeLock();
+        }
+      });
+    } catch (e) {}
   }
 
   function startTimer() {
@@ -1297,6 +1352,12 @@ function useTranslator() {
     if (micSourceRef.current) { micSourceRef.current.disconnect(); micSourceRef.current = null; }
     if (micMonitorGainRef.current) { micMonitorGainRef.current.disconnect(); micMonitorGainRef.current = null; }
     if (micStreamRef.current) { micStreamRef.current.getTracks().forEach(t => t.stop()); micStreamRef.current = null; }
+    if (micTrackListenersRef.current) {
+      const { track, handler } = micTrackListenersRef.current;
+      track.removeEventListener('ended', handler);
+      track.removeEventListener('mute', handler);
+      micTrackListenersRef.current = null;
+    }
     if (inputCtxRef.current) { inputCtxRef.current.close(); inputCtxRef.current = null; }
     if (outputCtxRef.current) { outputCtxRef.current.close(); outputCtxRef.current = null; }
     if (wakeLockRef.current) { wakeLockRef.current.release(); wakeLockRef.current = null; }
@@ -1578,15 +1639,23 @@ function SetupScreen({ onStart, theme, error, starting }) {
     return v === VOICE_BY_GENDER.M.id ? 'M' : 'F';
   });
   const [restSecs, setRestSecs] = React.useState(() => parseInt(localStorage.getItem('restSecs')) || 60);
+  const [apiKey, setApiKey] = React.useState(() => localStorage.getItem('gemini_api_key') || '');
+  const [showKey, setShowKey] = React.useState(false);
 
   const voice = voiceGender === 'M' ? VOICE_BY_GENDER.M.id : VOICE_BY_GENDER.F.id;
+  const hasEnvKey = !!(APP_CONFIG && APP_CONFIG.DEFAULT_API_KEY);
 
   React.useEffect(() => { localStorage.setItem('lang_a', langA); }, [langA]);
   React.useEffect(() => { localStorage.setItem('lang_b', langB); }, [langB]);
   React.useEffect(() => { localStorage.setItem('voice', voice); }, [voice]);
   React.useEffect(() => { localStorage.setItem('restSecs', restSecs); }, [restSecs]);
+  React.useEffect(() => {
+    if (apiKey) localStorage.setItem('gemini_api_key', apiKey);
+    else localStorage.removeItem('gemini_api_key');
+  }, [apiKey]);
 
   const sameLang = langA === langB;
+  const missingKey = !hasEnvKey && !apiKey;
 
   function pickVoice(gender) {
     if (previewVoiceAbort) previewVoiceAbort();
@@ -1603,6 +1672,40 @@ function SetupScreen({ onStart, theme, error, starting }) {
       <div style={{ textAlign: 'center', marginBottom: 20, paddingTop: 4 }}>
         <img src="logo.png" alt="Will Translator" style={{ width: 130, height: 'auto' }} />
       </div>
+
+      {!hasEnvKey && (
+        <div style={{ marginBottom: 16 }}>
+          <label style={{
+            fontSize: 12, fontWeight: 700, color: theme.textSec,
+            textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8, display: 'block',
+          }}>Chave da API Gemini</label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              type={showKey ? 'text' : 'password'}
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value.trim())}
+              placeholder="Cole sua API key do Google AI Studio"
+              autoComplete="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              style={{
+                flex: 1, padding: '12px 14px', borderRadius: theme.radius,
+                border: `1px solid ${theme.divider}`, background: theme.cardBg,
+                color: theme.text, fontSize: 14, fontFamily: theme.font, minWidth: 0,
+              }}
+            />
+            <button type="button" onClick={() => setShowKey(v => !v)} style={{
+              padding: '0 14px', borderRadius: theme.radius, border: `1px solid ${theme.divider}`,
+              background: theme.cardBg, color: theme.textSec, fontSize: 13, cursor: 'pointer',
+              fontFamily: theme.font,
+            }}>{showKey ? 'Ocultar' : 'Ver'}</button>
+          </div>
+          <p style={{ fontSize: 11, color: theme.textSec, margin: '6px 0 0' }}>
+            Fica salva só neste aparelho (localStorage), nunca em código público.
+            Gere a sua em <span style={{ textDecoration: 'underline' }}>aistudio.google.com/apikey</span>.
+          </p>
+        </div>
+      )}
 
       <LangPicker label="Eu falo" value={langA} theme={theme}
         open={openPicker === 'a'}
@@ -1679,6 +1782,13 @@ function SetupScreen({ onStart, theme, error, starting }) {
         }}>Os dois idiomas precisam ser diferentes.</div>
       )}
 
+      {missingKey && (
+        <div style={{
+          marginTop: 12, padding: '10px 14px', background: '#FFF3CD', color: '#856404',
+          borderRadius: theme.radius, fontSize: 13,
+        }}>Cole sua API key acima para poder iniciar.</div>
+      )}
+
       {error && (
         <div style={{
           marginTop: 12, padding: '10px 14px', background: '#FFE0E0', color: theme.danger,
@@ -1689,14 +1799,14 @@ function SetupScreen({ onStart, theme, error, starting }) {
       
       <button
         type="button"
-        onClick={() => !sameLang && !starting && onStart({ langA, langB, audio, voice, restSecs })}
-        disabled={sameLang || starting}
+        onClick={() => !sameLang && !starting && !missingKey && onStart({ langA, langB, audio, voice, restSecs })}
+        disabled={sameLang || starting || missingKey}
         style={{
           width: '100%', padding: '17px', borderRadius: theme.radius, marginTop: 20,
-          background: (sameLang || starting) ? theme.textTer : theme.primary,
+          background: (sameLang || starting || missingKey) ? theme.textTer : theme.primary,
           color: '#FFF', border: 'none', fontSize: 17, fontWeight: 600,
-          cursor: (sameLang || starting) ? 'not-allowed' : 'pointer', fontFamily: theme.font,
-          boxShadow: (sameLang || starting) ? 'none' : `0 4px 14px ${theme.primary}40`,
+          cursor: (sameLang || starting || missingKey) ? 'not-allowed' : 'pointer', fontFamily: theme.font,
+          boxShadow: (sameLang || starting || missingKey) ? 'none' : `0 4px 14px ${theme.primary}40`,
         }}>{starting ? 'Conectando...' : 'Iniciar Sessão'}</button>
     </div>
   );
