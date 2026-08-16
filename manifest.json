@@ -1,7 +1,7 @@
 {
   "name": "Tradutor Will",
   "short_name": "Tradutor",
-  "description": "Intérprete invisível PT-EN em tempo real para sessões de personal trainer",
+  "description": "Intérprete automático PT-BR ↔ EN-GB para aulas de personal trainer",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

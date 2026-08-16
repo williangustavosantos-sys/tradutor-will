@@ -1,0 +1,15 @@
+{
+  "name": "tradutor-will",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Tradutor Will — intérprete PT-BR ↔ EN-GB para aulas de personal trainer (PWA + backend Node.js que chama a API Gemini, uma fala por vez).",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "preview": "node server.js",
+    "build": "node scripts/build-static.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

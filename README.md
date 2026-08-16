@@ -1,99 +1,166 @@
-# Tradutor Will — Modo Solo
+# Tradutor Will
 
-Intérprete invisível PT ↔ EN em tempo real para sessões de personal trainer.
-Usa a **Gemini Live API** (áudio bidirecional end-to-end) para traduzir conversas com contexto, sem perder frases longas e sem timeout do microfone.
+Intérprete automático **PT-BR ↔ EN-GB** para aulas de personal trainer.
 
-## Como funciona
+O personal trainer fala português; o aluno fala inglês britânico. O app escuta
+sozinho, detecta o idioma, traduz para o idioma oposto e fala a tradução em voz
+alta — durante uma aula inteira, com um único toque no botão **Iniciar Aula**.
 
-1. Coloque o iPhone num suporte, próximo aos dois falantes.
-2. Toque **Iniciar Sessão**.
-3. Você fala em português → o app fala a tradução em inglês pelo alto-falante.
-4. O aluno fala em inglês → o app fala a tradução em português.
-5. O microfone fica aberto a sessão inteira — sem precisar tocar em nada.
+**Não é um chatbot.** Cada fala é independente: uma fala → uma requisição →
+uma tradução → contexto descartado. O app nunca responde perguntas, nunca dá
+conselhos e nunca usa histórico.
 
-O glossário técnico de treinamento funcional e biomecânica está embutido no arquivo `index.html`, nas constantes `PROMPT_PT_EN`, `PROMPT_PT_IT` e `PROMPT_EN_IT`.
+---
 
-## Como obter a API key (uma vez só)
+## Arquitetura
 
-1. Vá em **https://aistudio.google.com/apikey**
-2. Faça login com sua conta Google.
-3. Clique em **Create API key**.
-4. Copie a chave (começa com `AIza...`).
-5. Cole na tela inicial do app na primeira vez. Fica salva no celular.
+```
+Celular (PWA — React + mic)
+   │  captura áudio + VAD local
+   ▼
+POST /api/translate  (áudio WAV ou texto)
+   │
+   ▼
+Backend Node.js (server.js)  ←  GEMINI_API_KEY só existe aqui
+   │  chama Gemini (gemini-3.6-flash) com prompt fixo + glossário + schema JSON
+   ▼
+JSON validado  { sourceLanguage, targetLanguage, transcription, translatedText, isComplete, shouldSpeak }
+   │
+   ▼
+Frontend mostra a legenda e fala com SpeechSynthesis (half-duplex)
+```
 
-Mantenha essa chave privada — qualquer um com acesso a ela pode consumir seus créditos.
+- **A chave da API nunca vai para o navegador.** O frontend não tem campo de
+  chave, não usa `localStorage` para chave e não contém segredo no bundle.
+- **Sem WebSocket, sem sessão contínua.** Cada fala gera uma chamada stateless
+  ao modelo `gemini-3.6-flash`, que começa sem contexto.
+- O pipeline de áudio mantém **VAD** (detecção de voz por energia/RMS),
+  **ring buffer** (pré-roll antes da fala), **half-duplex** (o microfone fica
+  bloqueado durante `Traduzindo`, `Falando` e o `cooldown`) — assim a voz do
+  próprio app nunca vira uma nova tradução.
+- A voz é reproduzida pelo **SpeechSynthesis** do navegador, atrás da interface
+  `TextToSpeechProvider` (`tts.js`), pronta para ser trocada por Google Cloud
+  Text-to-Speech no futuro (chamando o backend).
 
-## Como rodar (hospedar grátis)
+---
 
-O Safari do iPhone só dá acesso ao microfone em sites com **HTTPS**. Por isso o app precisa estar hospedado. Três opções gratuitas, todas em 2 minutos:
+## Como instalar
 
-### Opção 1 — Vercel (mais simples)
+Requisitos: **Node.js ≥ 18** (usa apenas módulos nativos — zero dependências).
 
-1. Crie conta em **https://vercel.com** (login com GitHub ou Google).
-2. Clique em **Add New → Project**.
-3. Arraste a pasta `TRADUTOR WILL` inteira para o navegador.
-4. Em segundos, você recebe uma URL tipo `https://tradutor-will.vercel.app`.
-5. Abra essa URL no Safari do iPhone.
+```bash
+npm install
+```
 
-### Opção 2 — Netlify Drop
+## Como configurar
 
-1. Vá em **https://app.netlify.com/drop**.
-2. Arraste a pasta `TRADUTOR WILL` para a área indicada.
-3. Recebe uma URL HTTPS pronta.
+1. Crie uma chave em **https://aistudio.google.com/apikey** (conta Google).
+2. Crie o arquivo `.env` na raiz do projeto a partir do modelo abaixo:
 
-### Opção 3 — Cloudflare Pages
+   ```env
+   GEMINI_API_KEY=sua_chave_aqui
+   GEMINI_MODEL=gemini-3.6-flash
+   ```
 
-1. Crie conta em **https://pages.cloudflare.com**.
-2. Faça upload direto pela interface ou conecte um GitHub.
+   O arquivo `.env` **nunca deve ser commitado** (já está no `.gitignore`).
+   Em plataformas como Railway/Render/Fly/Vercel, defina `GEMINI_API_KEY` como
+   variável de ambiente do servidor em vez de usar o `.env`.
+
+> Dica: mantenha o modelo como `gemini-3.6-flash` (sem o prefixo `models/` — o
+> servidor adiciona sozinho).
+
+## Como executar
+
+```bash
+npm run dev     # inicia o backend (serve o app + a API) em http://localhost:3000
+npm start       # idem (produção)
+npm run build   # gera a pasta dist/ com apenas os arquivos estáticos do cliente
+```
+
+Abra `http://localhost:3000` no Safari/Chrome (**HTTPS** é necessário para o
+microfone em produção; em `localhost` o navegador permite).
+
+### Testes rápidos da API
+
+```bash
+# Saúde do servidor (informa se a chave está configurada)
+curl http://localhost:3000/api/health
+
+# Tradução por texto
+curl -X POST http://localhost:3000/api/translate \
+  -H 'Content-Type: application/json' \
+  -d '{"text": "Agora vamos fazer três séries de doze repetições."}'
+```
+
+---
+
+## Deploy no Vercel
+
+O backend roda como **serverless functions** (pasta `api/`) e o frontend é
+servido de `dist/` (gerado por `npm run build`). Tudo já configurado no
+`vercel.json`.
+
+1. Importe este repositório no Vercel: <https://vercel.com/new>.
+2. Em **Environment Variables**, adicione:
+
+   ```env
+   GEMINI_API_KEY=sua_chave_aqui
+   GEMINI_MODEL=gemini-3.6-flash
+   ```
+
+3. Deploy (o build roda sozinho, sem config extra).
+
+> O microfone exige **HTTPS**, que o Vercel já fornece. No iPhone, abra a URL
+> no Safari e toque em **Compartilhar → Adicionar à Tela de Início** para virar
+> um app em tela cheia.
+
+Teste após o deploy: `https://SEU-APP.vercel.app/api/health` deve retornar
+`{"ok":true,"configured":true}`.
+
+---
+
+## Cenários de teste
+
+1. **Abrir sem chave manual** — a tela inicial tem só o botão *Iniciar Aula*.
+   Nenhum campo de API key.
+2. **Falar português** — *"Agora vamos fazer três séries de doze repetições."*
+   → o app fala *"Now we're going to do three sets of twelve reps."*
+3. **Falar inglês** — *"Should I keep my back straight?"*
+   → o app fala *"Eu devo manter minhas costas retas?"*
+4. **Durante a reprodução da voz** — falar/fazer barulho/bater palma. A
+   tradução em curso continua; nenhuma tradução nova começa; o app volta a
+   *Ouvindo* só depois do cooldown.
+5. **Sessão longa simulada** — 100 falas alternando PT/EN. Os painéis são
+   limitados a 60 entradas por lado e nenhum contexto acumula entre falas.
+
+---
 
 ## Como instalar como app no iPhone
 
-Depois que estiver hospedado:
+1. Abra a URL no **Safari** (precisa ser Safari).
+2. Toque em **Compartilhar** (quadrado com seta) → **Adicionar à Tela de Início**.
+3. Pronto: vira um app em tela cheia.
 
-1. Abra a URL no **Safari** (precisa ser Safari, não Chrome).
-2. Toque no ícone de **Compartilhar** (quadrado com seta pra cima).
-3. Role e toque em **Adicionar à Tela de Início**.
-4. Pronto — vira um app na home, abre tela cheia, sem barra de navegação.
+## Permissões
 
-## Permissões necessárias
-
-Na primeira vez que tocar em "Iniciar Sessão", o iPhone vai pedir:
-
-- **Microfone** — obrigatório.
-- (Wake Lock é automático, mantém a tela acesa enquanto a sessão está ativa.)
-
-## Limitações da v1 (Modo Solo)
-
-- **Precisa de internet** — sem conexão, a API não funciona.
-- **Tela acesa durante a sessão** — para Modo Solo isso é OK (celular no suporte). O **Modo Pareado** (com fone, celular no bolso) será adicionado na próxima versão.
-- **Sessões muito longas (>1h)** — a Live API pode encerrar conexões longas. O app renova a conexão de forma preventiva durante a sessão e reaplica o contexto recente ao prompt para continuar traduzindo com sentido.
-- **Ícones** — placeholders. Você pode substituir `icon-192.png` e `icon-512.png` por imagens próprias.
-
-## Estimativa de custo
-
-Pela tabela atual da Gemini Live API (Google AI Studio):
-
-- ~US$ 0,50 a US$ 2,00 por sessão de 1 hora (depende de quanto vocês falam).
-- Crédito gratuito mensal do AI Studio costuma cobrir várias sessões por mês.
+- **Microfone** — obrigatório (pedido ao tocar em *Iniciar Aula*).
+- **Wake Lock** — automático: mantém a tela acesa durante a sessão.
 
 ## Solução de problemas
 
-**"Erro ao iniciar"** — verifique se a API key está correta e ativa. Teste em [https://aistudio.google.com](https://aistudio.google.com).
+- **"Serviço indisponível — o servidor não está configurado"** — o `.env` não
+  existe ou `GEMINI_API_KEY` está vazia. Configure e reinicie o servidor.
+- **"A chave da API do servidor é inválida"** — a chave está errada ou sem
+  permissão. Confira em https://aistudio.google.com/apikey.
+- **"A cota da API foi atingida"** — aguarde ou aumente a cota no AI Studio.
+- **Microfone não capta** — use HTTPS e permita o microfone. Em iPhone, o
+  navegador pode capturar em 44.1/48 kHz; o app lê o sample rate real e envia
+  o áudio como WAV.
+- **Não fala nada em ambiente muito barulhento** — o VAD adapta o piso de ruído;
+  fale próximo ao celular e evite música alta colada ao microfone.
 
-**Microfone não capta voz** — abra o app por uma URL **HTTPS** no Safari/Chrome e permita o microfone. Em iPhone, o navegador pode capturar em 44.1/48 kHz mesmo quando o app pede 16 kHz; o app envia o sample rate real para a Gemini e mantém um fallback de captura caso o AudioWorklet falhe.
+## Custo estimado
 
-**Sessão de 1 hora** — a Live API pode encerrar conexões por volta de 10–15 minutos. O app renova a conexão preventivamente a cada ~8,5 minutos, reaplica o contexto recente e tenta modelos fallback se o modelo principal estiver indisponível.
-
-**Áudio cortado / lento** — provavelmente Wi-Fi ruim ou rede móvel fraca. Tente trocar de rede.
-
-**Aluno não ouviu uma frase curta** — interjeições muito curtas ("hm", "ok") são propositalmente ignoradas. Fale a frase completa.
-
-**Tradução errada de um termo técnico** — edite o glossário em `index.html`, na constante do par de idiomas usado. Faça novo upload pra Vercel/Netlify (arrastar de novo substitui).
-
-## Roadmap
-
-- [ ] **Modo Pareado** — 2 celulares conectados, cada um com fone, áudio só no destinatário (academia, ambiente ruidoso, celular no bolso)
-- [ ] **Voz configurável** — escolher entre vozes masculinas/femininas
-- [ ] **Histórico de sessões** — salvar transcrição para revisar depois
-- [ ] **Glossário personalizado pela UI** — adicionar termos sem editar código
-- [ ] **Modo italiano** — para os seus estudos
+Com `gemini-3.6-flash`, uma aula de 1 hora (várias falas curtas) custa centavos
+— muito menos que uma sessão contínua da Live API. O crédito gratuito do AI
+Studio costuma cobrir várias aulas por mês.
