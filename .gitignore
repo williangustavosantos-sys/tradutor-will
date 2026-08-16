@@ -4,6 +4,12 @@
 # Dependências e artefatos locais
 node_modules/
 output/
+dist/
+
+# Segredos — nunca versionar
+.env
+.env.local
+.env.*.local
 
 # Ferramentas / IDE
 .cursor/
